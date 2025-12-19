@@ -17,6 +17,10 @@ linters-settings:
     checks:
       - all
       - -SA9003     # Empty branch - sometimes intentional for clarity
+  gosimple:
+    checks:
+      - all
+      - -S1009      # Nil check before len() - sometimes clearer to be explicit
 
 issues:
   exclude-rules:

@@ -153,21 +153,19 @@ func executeKeysetPagination(
 	colList := "[" + strings.Join(cols, "], [") + "]"
 
 	var lastPK any
-	var minPK, maxPK any
+	var maxPK any
 
-	// Use resume point if available
+	// Set partition bounds if applicable
+	if job.Partition != nil {
+		maxPK = job.Partition.MaxPK
+	}
+
+	// Use resume point if available, otherwise start from partition min
 	if resumeLastPK != nil {
 		lastPK = resumeLastPK
 	} else if job.Partition != nil {
-		minPK = job.Partition.MinPK
-		maxPK = job.Partition.MaxPK
 		// Start from one before minPK to include minPK in first chunk
-		lastPK = decrementPK(minPK)
-	}
-
-	if job.Partition != nil {
-		minPK = job.Partition.MinPK
-		maxPK = job.Partition.MaxPK
+		lastPK = decrementPK(job.Partition.MinPK)
 	}
 
 	chunkSize := cfg.Migration.ChunkSize
