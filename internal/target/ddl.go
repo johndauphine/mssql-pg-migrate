@@ -12,7 +12,7 @@ import (
 func GenerateDDL(t *source.Table, targetSchema string) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("CREATE UNLOGGED TABLE IF NOT EXISTS %s.%q (\n",
+	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%q (\n",
 		targetSchema, t.Name))
 
 	for i, col := range t.Columns {

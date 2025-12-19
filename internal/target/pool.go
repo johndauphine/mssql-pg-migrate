@@ -59,7 +59,7 @@ func (p *Pool) CreateSchema(ctx context.Context, schema string) error {
 	return err
 }
 
-// CreateTable creates a table from source metadata (as UNLOGGED for speed)
+// CreateTable creates a table from source metadata
 func (p *Pool) CreateTable(ctx context.Context, t *source.Table, targetSchema string) error {
 	ddl := GenerateDDL(t, targetSchema)
 
@@ -77,11 +77,6 @@ func (p *Pool) TruncateTable(ctx context.Context, schema, table string) error {
 	return err
 }
 
-// ConvertToLogged converts an UNLOGGED table to LOGGED
-func (p *Pool) ConvertToLogged(ctx context.Context, schema, table string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s.%q SET LOGGED", schema, table))
-	return err
-}
 
 // CreatePrimaryKey creates a primary key on the table
 func (p *Pool) CreatePrimaryKey(ctx context.Context, t *source.Table, targetSchema string) error {

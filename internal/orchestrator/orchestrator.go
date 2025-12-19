@@ -308,13 +308,9 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 }
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
-	// Phase 1: Convert to logged and reset sequences
-	fmt.Println("  Converting tables to logged...")
+	// Phase 1: Reset sequences
+	fmt.Println("  Resetting sequences...")
 	for _, t := range tables {
-		if err := o.targetPool.ConvertToLogged(ctx, o.config.Target.Schema, t.Name); err != nil {
-			fmt.Printf("Warning: converting %s to logged: %v\n", t.Name, err)
-		}
-
 		if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &t); err != nil {
 			fmt.Printf("Warning: resetting sequence for %s: %v\n", t.Name, err)
 		}

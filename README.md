@@ -143,11 +143,11 @@ slack:
 ## How it works
 
 1. **Extract schema** - Reads table structure, indexes, FKs, and check constraints from SQL Server
-2. **Create tables** - Generates and executes PostgreSQL DDL (as UNLOGGED for speed)
+2. **Create tables** - Generates and executes PostgreSQL DDL
 3. **Transfer data** - Uses optimal pagination strategy:
    - **Keyset pagination** for single-column integer PKs (fastest)
    - **ROW_NUMBER pagination** for composite/varchar PKs
-4. **Finalize** - Converts to LOGGED tables, resets sequences, creates PKs
+4. **Finalize** - Resets sequences, creates primary keys
 5. **Create indexes** - Non-PK indexes (if enabled)
 6. **Create foreign keys** - FK constraints (if enabled)
 7. **Create check constraints** - CHECK constraints (if enabled)
@@ -222,7 +222,6 @@ When a partition transfer fails and retries, the tool automatically cleans up an
 - [x] Slack notifications
 - [x] Keyset pagination (vs OFFSET)
 - [x] ROW_NUMBER pagination for composite PKs
-- [x] Unlogged tables during transfer
 - [x] Foreign key creation
 - [x] Index creation
 - [x] Check constraint creation
