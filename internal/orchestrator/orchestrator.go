@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Println("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
+		o.state.CompleteRun(runID, "failed")
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("extracting schema: %w", err)
 	}
@@ -143,6 +145,13 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		}
 	}
 
+	// Apply table filters
+	tables = o.filterTables(tables)
+	if len(tables) == 0 {
+		o.state.CompleteRun(runID, "failed")
+		return fmt.Errorf("no tables to migrate after applying filters")
+	}
+
 	o.tables = tables
 	fmt.Printf("Found %d tables\n", len(tables))
 
@@ -164,6 +173,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Create target schema and tables
 	if err := o.targetPool.CreateSchema(ctx, o.config.Target.Schema); err != nil {
+		o.state.CompleteRun(runID, "failed")
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("creating schema: %w", err)
 	}
@@ -173,16 +183,19 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		for _, t := range tables {
 			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 			if err != nil {
+				o.state.CompleteRun(runID, "failed")
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
 			}
 			if exists {
 				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+					o.state.CompleteRun(runID, "failed")
 					o.notifyFailure(runID, err, time.Since(startTime))
 					return fmt.Errorf("truncating table %s: %w", t.Name, err)
 				}
 			} else {
 				if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+					o.state.CompleteRun(runID, "failed")
 					o.notifyFailure(runID, err, time.Since(startTime))
 					return fmt.Errorf("creating table %s: %w", t.FullName(), err)
 				}
@@ -193,10 +206,12 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		fmt.Println("Creating target tables (drop and recreate)...")
 		for _, t := range tables {
 			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+				o.state.CompleteRun(runID, "failed")
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("dropping table %s: %w", t.Name, err)
 			}
 			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+				o.state.CompleteRun(runID, "failed")
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("creating table %s: %w", t.FullName(), err)
 			}
@@ -214,6 +229,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Finalize
 	fmt.Println("Finalizing...")
 	if err := o.finalize(ctx, tables); err != nil {
+		o.state.CompleteRun(runID, "failed")
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
@@ -254,8 +270,70 @@ func (o *Orchestrator) notifyFailure(runID string, err error, duration time.Dura
 	o.notifier.MigrationFailed(runID, err, duration)
 }
 
+// markTableComplete marks a table transfer task as complete
+func (o *Orchestrator) markTableComplete(runID, taskKey string) {
+	o.state.MarkTaskComplete(runID, taskKey)
+}
+
+// filterTables filters tables based on include/exclude patterns
+func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
+	include := o.config.Migration.IncludeTables
+	exclude := o.config.Migration.ExcludeTables
+
+	// If no filters configured, return all tables
+	if len(include) == 0 && len(exclude) == 0 {
+		return tables
+	}
+
+	var filtered []source.Table
+	var skipped []string
+
+	for _, t := range tables {
+		tableName := strings.ToLower(t.Name)
+
+		// Check include patterns (if specified, table must match at least one)
+		if len(include) > 0 {
+			matched := false
+			for _, pattern := range include {
+				if match, _ := filepath.Match(strings.ToLower(pattern), tableName); match {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				skipped = append(skipped, t.Name)
+				continue
+			}
+		}
+
+		// Check exclude patterns (table must not match any)
+		excluded := false
+		for _, pattern := range exclude {
+			if match, _ := filepath.Match(strings.ToLower(pattern), tableName); match {
+				excluded = true
+				skipped = append(skipped, t.Name)
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+
+		filtered = append(filtered, t)
+	}
+
+	if len(skipped) > 0 {
+		fmt.Printf("Skipped %d tables by filter: %v\n", len(skipped), skipped)
+	}
+
+	return filtered
+}
+
 func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table) error {
 	var jobs []transfer.Job
+
+	// Track jobs per table for completion tracking
+	tableJobs := make(map[string]int) // tableName -> number of jobs
 
 	for _, t := range tables {
 		if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasSinglePK() {
@@ -270,6 +348,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				return fmt.Errorf("partitioning %s: %w", t.FullName(), err)
 			}
 
+			tableJobs[t.Name] = len(partitions)
 			for _, p := range partitions {
 				jobs = append(jobs, transfer.Job{
 					Table:     t,
@@ -277,6 +356,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				})
 			}
 		} else {
+			tableJobs[t.Name] = 1
 			jobs = append(jobs, transfer.Job{
 				Table:     t,
 				Partition: nil,
@@ -297,8 +377,10 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	// Stats collection per table
 	type tableStats struct {
-		mu    sync.Mutex
-		stats *transfer.TransferStats
+		mu           sync.Mutex
+		stats        *transfer.TransferStats
+		jobsComplete int
+		jobsFailed   int
 	}
 	statsMap := make(map[string]*tableStats)
 	for _, t := range tables {
@@ -323,21 +405,31 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			defer func() { <-sem }()
 
 			stats, err := transfer.Execute(ctx, o.sourcePool, o.targetPool, o.config, j, o.progress)
+
+			// Update table stats and completion tracking
+			ts := statsMap[j.Table.Name]
+			ts.mu.Lock()
 			if err != nil {
+				ts.jobsFailed++
+				ts.mu.Unlock()
 				errCh <- fmt.Errorf("transfer %s: %w", j.Table.FullName(), err)
 				return
 			}
 
-			// Aggregate stats per table
 			if stats != nil {
-				ts := statsMap[j.Table.Name]
-				ts.mu.Lock()
 				ts.stats.QueryTime += stats.QueryTime
 				ts.stats.ScanTime += stats.ScanTime
 				ts.stats.WriteTime += stats.WriteTime
 				ts.stats.Rows += stats.Rows
-				ts.mu.Unlock()
 			}
+			ts.jobsComplete++
+
+			// If all jobs for this table are complete, mark task as success
+			if ts.jobsComplete == tableJobs[j.Table.Name] && ts.jobsFailed == 0 {
+				taskKey := fmt.Sprintf("transfer:%s.%s", j.Table.Schema, j.Table.Name)
+				o.markTableComplete(runID, taskKey)
+			}
+			ts.mu.Unlock()
 		}(job)
 	}
 
@@ -571,21 +663,158 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		return fmt.Errorf("finding incomplete run: %w", err)
 	}
 	if run == nil {
-		return fmt.Errorf("no incomplete run found")
+		return fmt.Errorf("no incomplete run found - use 'run' to start a new migration")
 	}
 
+	startTime := time.Now()
 	fmt.Printf("Resuming run: %s (started %s)\n", run.ID, run.StartedAt.Format(time.RFC3339))
 
-	// Reset running tasks to pending
-	tasks, err := o.state.GetPendingTasks(run.ID)
+	// Reset any running tasks to pending
+	if err := o.state.MarkRunAsResumed(run.ID); err != nil {
+		return fmt.Errorf("resetting tasks: %w", err)
+	}
+
+	// Extract schema (needed to know all tables)
+	fmt.Println("Extracting schema...")
+	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
+		o.state.CompleteRun(run.ID, "failed")
+		o.notifyFailure(run.ID, err, time.Since(startTime))
+		return fmt.Errorf("extracting schema: %w", err)
+	}
+
+	// Apply table filters
+	tables = o.filterTables(tables)
+	if len(tables) == 0 {
+		o.state.CompleteRun(run.ID, "failed")
+		return fmt.Errorf("no tables to migrate after applying filters")
+	}
+
+	o.tables = tables
+	fmt.Printf("Found %d tables in source\n", len(tables))
+
+	// Get tables that were successfully transferred in the previous run
+	completedTables, err := o.state.GetCompletedTables(run.ID)
+	if err != nil {
+		return fmt.Errorf("getting completed tables: %w", err)
+	}
+
+	// Check target row counts to determine which tables need re-transfer
+	var tablesToTransfer []source.Table
+	var skippedTables []string
+
+	for _, t := range tables {
+		// Check if table was marked complete AND has correct row count
+		taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+		if completedTables[taskKey] {
+			// Verify row count matches
+			targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
+			if err == nil && targetCount == t.RowCount {
+				skippedTables = append(skippedTables, t.Name)
+				continue
+			}
+		}
+		tablesToTransfer = append(tablesToTransfer, t)
+	}
+
+	if len(skippedTables) > 0 {
+		fmt.Printf("Skipping %d already-complete tables: %v\n", len(skippedTables), skippedTables)
+	}
+
+	if len(tablesToTransfer) == 0 {
+		fmt.Println("All tables already transferred - completing migration")
+		o.tables = tables // Use all tables for finalize/validate
+
+		// Finalize
+		fmt.Println("Finalizing...")
+		if err := o.finalize(ctx, tables); err != nil {
+			o.state.CompleteRun(run.ID, "failed")
+			o.notifyFailure(run.ID, err, time.Since(startTime))
+			return fmt.Errorf("finalizing: %w", err)
+		}
+
+		// Validate
+		fmt.Println("Validating...")
+		if err := o.Validate(ctx); err != nil {
+			o.state.CompleteRun(run.ID, "failed")
+			o.notifyFailure(run.ID, err, time.Since(startTime))
+			return err
+		}
+
+		o.state.CompleteRun(run.ID, "success")
+		fmt.Println("Resume complete!")
+		return nil
+	}
+
+	fmt.Printf("Resuming transfer of %d tables\n", len(tablesToTransfer))
+
+	// For tables that need transfer, ensure target tables exist
+	// (they should, but check in case of partial DDL)
+	for _, t := range tablesToTransfer {
+		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
+		if err != nil {
+			o.state.CompleteRun(run.ID, "failed")
+			return fmt.Errorf("checking table %s: %w", t.Name, err)
+		}
+		if !exists {
+			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+				o.state.CompleteRun(run.ID, "failed")
+				return fmt.Errorf("creating table %s: %w", t.Name, err)
+			}
+		} else {
+			// Truncate to ensure clean re-transfer
+			if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+				o.state.CompleteRun(run.ID, "failed")
+				return fmt.Errorf("truncating table %s: %w", t.Name, err)
+			}
+		}
+	}
+
+	// Transfer only the incomplete tables
+	fmt.Println("Transferring data...")
+	if err := o.transferAll(ctx, run.ID, tablesToTransfer); err != nil {
+		o.state.CompleteRun(run.ID, "failed")
+		o.notifyFailure(run.ID, err, time.Since(startTime))
+		return fmt.Errorf("transferring data: %w", err)
+	}
+
+	// Finalize (uses all tables for constraints)
+	o.tables = tables
+	fmt.Println("Finalizing...")
+	if err := o.finalize(ctx, tables); err != nil {
+		o.state.CompleteRun(run.ID, "failed")
+		o.notifyFailure(run.ID, err, time.Since(startTime))
+		return fmt.Errorf("finalizing: %w", err)
+	}
+
+	// Validate all tables
+	fmt.Println("Validating...")
+	if err := o.Validate(ctx); err != nil {
+		o.state.CompleteRun(run.ID, "failed")
+		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return err
 	}
 
-	fmt.Printf("Found %d pending tasks\n", len(tasks))
+	// Sample validation if enabled
+	if o.config.Migration.SampleValidation {
+		fmt.Println("Running sample validation...")
+		if err := o.validateSamples(ctx); err != nil {
+			fmt.Printf("Warning: sample validation failed: %v\n", err)
+		}
+	}
 
-	// Continue with run
-	return o.Run(ctx)
+	duration := time.Since(startTime)
+	var totalRows int64
+	for _, t := range tablesToTransfer {
+		totalRows += t.RowCount
+	}
+	throughput := float64(totalRows) / duration.Seconds()
+
+	o.state.CompleteRun(run.ID, "success")
+	o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
+	fmt.Println("Resume complete!")
+
+	return nil
 }
 
 // ShowStatus displays status of current/last run

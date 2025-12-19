@@ -151,15 +151,21 @@ func (s *State) CompleteRun(id string, status string) error {
 // GetLastIncompleteRun returns the most recent incomplete run
 func (s *State) GetLastIncompleteRun() (*Run, error) {
 	var r Run
+	var startedAtStr string
 	err := s.db.QueryRow(`
 		SELECT id, started_at, status, source_schema, target_schema
 		FROM runs WHERE status = 'running'
 		ORDER BY started_at DESC LIMIT 1
-	`).Scan(&r.ID, &r.StartedAt, &r.Status, &r.SourceSchema, &r.TargetSchema)
+	`).Scan(&r.ID, &startedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &r, err
+	if err != nil {
+		return nil, err
+	}
+	// Parse SQLite datetime string
+	r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+	return &r, nil
 }
 
 // CreateTask creates a new task
@@ -265,13 +271,56 @@ func (s *State) GetRunStats(runID string) (total, pending, running, success, fai
 	err = s.db.QueryRow(`
 		SELECT
 			COUNT(*),
-			SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
-			SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
-			SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
-			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+			COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
 		FROM tasks WHERE run_id = ?
 	`, runID).Scan(&total, &pending, &running, &success, &failed)
 	return
+}
+
+// GetCompletedTables returns table names that completed successfully in a run
+func (s *State) GetCompletedTables(runID string) (map[string]bool, error) {
+	rows, err := s.db.Query(`
+		SELECT task_key FROM tasks
+		WHERE run_id = ? AND task_type = 'transfer' AND status = 'success'
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	completed := make(map[string]bool)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		completed[key] = true
+	}
+	return completed, nil
+}
+
+// MarkRunAsResumed resets running tasks to pending for resume
+func (s *State) MarkRunAsResumed(runID string) error {
+	_, err := s.db.Exec(`
+		UPDATE tasks SET status = 'pending', started_at = NULL
+		WHERE run_id = ? AND status = 'running'
+	`, runID)
+	return err
+}
+
+// MarkTaskComplete marks a task as complete by run_id and task_key
+func (s *State) MarkTaskComplete(runID, taskKey string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO tasks (run_id, task_type, task_key, status, completed_at)
+		VALUES (?, 'transfer', ?, 'success', datetime('now'))
+		ON CONFLICT(run_id, task_key) DO UPDATE SET
+			status = 'success',
+			completed_at = datetime('now')
+	`, runID, taskKey)
+	return err
 }
 
 // GetAllRuns returns all runs for history
@@ -288,8 +337,15 @@ func (s *State) GetAllRuns() ([]Run, error) {
 	var runs []Run
 	for rows.Next() {
 		var r Run
-		if err := rows.Scan(&r.ID, &r.StartedAt, &r.CompletedAt, &r.Status, &r.SourceSchema, &r.TargetSchema); err != nil {
+		var startedAtStr string
+		var completedAtStr sql.NullString
+		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema); err != nil {
 			return nil, err
+		}
+		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+		if completedAtStr.Valid {
+			t, _ := time.Parse("2006-01-02 15:04:05", completedAtStr.String)
+			r.CompletedAt = &t
 		}
 		runs = append(runs, r)
 	}

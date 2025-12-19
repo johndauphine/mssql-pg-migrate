@@ -53,7 +53,8 @@ type MigrationConfig struct {
 	MaxPartitions          int      `yaml:"max_partitions"`
 	Workers                int      `yaml:"workers"`
 	LargeTableThreshold    int64    `yaml:"large_table_threshold"`
-	ExcludeTables          []string `yaml:"exclude_tables"`
+	IncludeTables          []string `yaml:"include_tables"`           // Only migrate these tables (glob patterns)
+	ExcludeTables          []string `yaml:"exclude_tables"`           // Skip these tables (glob patterns)
 	DataDir                string   `yaml:"data_dir"`
 	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default) or "truncate"
 	StrictConsistency      bool     `yaml:"strict_consistency"`       // Use table locks instead of NOLOCK
