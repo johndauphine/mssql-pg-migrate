@@ -17,10 +17,18 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/target"
 )
 
+// ProgressSaver is an interface for saving transfer progress
+type ProgressSaver interface {
+	SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
+	GetProgress(taskID int64) (lastPK any, rowsDone int64, err error)
+}
+
 // Job represents a data transfer job
 type Job struct {
 	Table     source.Table
 	Partition *source.Partition
+	TaskID    int64         // For chunk-level resume
+	Saver     ProgressSaver // For saving progress (nil to disable)
 }
 
 // TransferStats tracks timing statistics for profiling
@@ -52,17 +60,33 @@ func Execute(
 	job Job,
 	prog *progress.Tracker,
 ) (*TransferStats, error) {
-	// Handle truncation based on job type
-	if job.Partition == nil {
-		// Non-partitioned table: truncate here (no race possible)
-		if err := tgtPool.TruncateTable(ctx, cfg.Target.Schema, job.Table.Name); err != nil {
-			// Ignore truncate errors (table might not exist)
+	// Check for saved progress (chunk-level resume)
+	var resumeLastPK any
+	var resumeRowsDone int64
+	if job.Saver != nil && job.TaskID > 0 {
+		var err error
+		resumeLastPK, resumeRowsDone, err = job.Saver.GetProgress(job.TaskID)
+		if err != nil {
+			fmt.Printf("Warning: loading progress for %s: %v\n", job.Table.Name, err)
 		}
-	} else {
-		// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
-		if job.Table.SupportsKeysetPagination() {
-			if err := cleanupPartitionData(ctx, tgtPool.Pool(), cfg.Target.Schema, &job); err != nil {
-				fmt.Printf("Warning: cleanup partition data for %s: %v\n", job.Table.Name, err)
+		if resumeLastPK != nil {
+			fmt.Printf("Resuming %s from chunk (lastPK=%v, rows=%d)\n", job.Table.Name, resumeLastPK, resumeRowsDone)
+		}
+	}
+
+	// Handle truncation based on job type (skip if resuming)
+	if resumeLastPK == nil {
+		if job.Partition == nil {
+			// Non-partitioned table: truncate here (no race possible)
+			if err := tgtPool.TruncateTable(ctx, cfg.Target.Schema, job.Table.Name); err != nil {
+				// Ignore truncate errors (table might not exist)
+			}
+		} else {
+			// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
+			if job.Table.SupportsKeysetPagination() {
+				if err := cleanupPartitionData(ctx, tgtPool.Pool(), cfg.Target.Schema, &job); err != nil {
+					fmt.Printf("Warning: cleanup partition data for %s: %v\n", job.Table.Name, err)
+				}
 			}
 		}
 	}
@@ -77,11 +101,11 @@ func Execute(
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool.DB(), tgtPool.Pool(), cfg, job, cols, colTypes, prog)
+		return executeKeysetPagination(ctx, srcPool.DB(), tgtPool.Pool(), cfg, job, cols, colTypes, prog, resumeLastPK, resumeRowsDone)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool.DB(), tgtPool.Pool(), cfg, job, cols, colTypes, prog)
+	return executeRowNumberPagination(ctx, srcPool.DB(), tgtPool.Pool(), cfg, job, cols, colTypes, prog, resumeRowsDone)
 }
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry)
@@ -109,6 +133,8 @@ func executeKeysetPagination(
 	job Job,
 	cols, colTypes []string,
 	prog *progress.Tracker,
+	resumeLastPK any,
+	resumeRowsDone int64,
 ) (*TransferStats, error) {
 	stats := &TransferStats{}
 	pkCol := job.Table.PrimaryKey[0]
@@ -117,15 +143,25 @@ func executeKeysetPagination(
 	var lastPK any
 	var minPK, maxPK any
 
-	if job.Partition != nil {
+	// Use resume point if available
+	if resumeLastPK != nil {
+		lastPK = resumeLastPK
+	} else if job.Partition != nil {
 		minPK = job.Partition.MinPK
 		maxPK = job.Partition.MaxPK
 		// Start from one before minPK to include minPK in first chunk
 		lastPK = decrementPK(minPK)
 	}
 
+	if job.Partition != nil {
+		minPK = job.Partition.MinPK
+		maxPK = job.Partition.MaxPK
+	}
+
 	chunkSize := cfg.Migration.ChunkSize
-	totalTransferred := int64(0)
+	totalTransferred := resumeRowsDone
+	chunkCount := 0
+	const saveProgressEvery = 10 // Save progress every N chunks
 
 	for {
 		select {
@@ -223,10 +259,22 @@ func executeKeysetPagination(
 		prog.Add(int64(len(chunk)))
 		totalTransferred += int64(len(chunk))
 		stats.Rows = totalTransferred
+		chunkCount++
 
 		// Update lastPK for next iteration
 		if newLastPK != nil {
 			lastPK = newLastPK
+		}
+
+		// Save progress periodically for chunk-level resume
+		if job.Saver != nil && job.TaskID > 0 && chunkCount%saveProgressEvery == 0 {
+			var partID *int
+			if job.Partition != nil {
+				partID = &job.Partition.PartitionID
+			}
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, lastPK, totalTransferred, job.Table.RowCount); err != nil {
+				fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
+			}
 		}
 
 		if len(chunk) < chunkSize {
@@ -246,6 +294,7 @@ func executeRowNumberPagination(
 	job Job,
 	cols, colTypes []string,
 	prog *progress.Tracker,
+	resumeRowsDone int64,
 ) (*TransferStats, error) {
 	stats := &TransferStats{}
 	colList := "[" + strings.Join(cols, "], [") + "]"
@@ -270,7 +319,9 @@ func executeRowNumberPagination(
 	}
 
 	chunkSize := cfg.Migration.ChunkSize
-	rowNum := int64(0)
+	rowNum := resumeRowsDone // Resume from where we left off
+	chunkCount := 0
+	const saveProgressEvery = 10
 
 	for {
 		select {
@@ -329,6 +380,19 @@ func executeRowNumberPagination(
 		prog.Add(int64(len(chunk)))
 		rowNum += int64(len(chunk))
 		stats.Rows = rowNum
+		chunkCount++
+
+		// Save progress periodically for chunk-level resume
+		if job.Saver != nil && job.TaskID > 0 && chunkCount%saveProgressEvery == 0 {
+			var partID *int
+			if job.Partition != nil {
+				partID = &job.Partition.PartitionID
+			}
+			// For ROW_NUMBER pagination, save rowNum as progress (not lastPK)
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, rowNum, rowNum, job.Table.RowCount); err != nil {
+				fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
+			}
+		}
 
 		if len(chunk) < chunkSize {
 			break

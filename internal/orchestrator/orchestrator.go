@@ -332,6 +332,9 @@ func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
 func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table) error {
 	var jobs []transfer.Job
 
+	// Create progress saver for chunk-level resume
+	progressSaver := checkpoint.NewProgressSaver(o.state)
+
 	// Track jobs per table for completion tracking
 	tableJobs := make(map[string]int) // tableName -> number of jobs
 
@@ -350,16 +353,28 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 			tableJobs[t.Name] = len(partitions)
 			for _, p := range partitions {
+				// Create task for chunk-level tracking
+				taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
+				taskID, _ := o.state.CreateTask(runID, "transfer", taskKey)
+
 				jobs = append(jobs, transfer.Job{
 					Table:     t,
 					Partition: &p,
+					TaskID:    taskID,
+					Saver:     progressSaver,
 				})
 			}
 		} else {
 			tableJobs[t.Name] = 1
+			// Create task for chunk-level tracking
+			taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+			taskID, _ := o.state.CreateTask(runID, "transfer", taskKey)
+
 			jobs = append(jobs, transfer.Job{
 				Table:     t,
 				Partition: nil,
+				TaskID:    taskID,
+				Saver:     progressSaver,
 			})
 		}
 	}

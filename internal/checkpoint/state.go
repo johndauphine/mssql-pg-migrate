@@ -323,6 +323,39 @@ func (s *State) MarkTaskComplete(runID, taskKey string) error {
 	return err
 }
 
+// ProgressSaver implements transfer.ProgressSaver interface
+type ProgressSaver struct {
+	state *State
+}
+
+// NewProgressSaver creates a progress saver wrapping the state
+func NewProgressSaver(s *State) *ProgressSaver {
+	return &ProgressSaver{state: s}
+}
+
+// SaveProgress saves chunk-level progress for resume
+func (p *ProgressSaver) SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error {
+	return p.state.SaveTransferProgress(taskID, tableName, partitionID, lastPK, rowsDone, rowsTotal)
+}
+
+// GetProgress retrieves saved progress for a task
+func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, err error) {
+	prog, err := p.state.GetTransferProgress(taskID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if prog == nil {
+		return nil, 0, nil
+	}
+	// Unmarshal lastPK from JSON
+	if prog.LastPK != "" {
+		if err := json.Unmarshal([]byte(prog.LastPK), &lastPK); err != nil {
+			return nil, prog.RowsDone, nil // Ignore unmarshal errors, just return rowsDone
+		}
+	}
+	return lastPK, prog.RowsDone, nil
+}
+
 // GetAllRuns returns all runs for history
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`

@@ -179,16 +179,34 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 		return nil
 	}
 
-	// Get sequence name and reset
-	// Note: pg_get_serial_sequence requires quoted identifiers for case-sensitive names
-	sql := fmt.Sprintf(`
-		SELECT setval(
-			pg_get_serial_sequence('"%s"."%s"', '%s'),
-			COALESCE((SELECT MAX(%q) FROM %s.%q), 1)
-		)
-	`, schema, t.Name, identityCol, identityCol, schema, t.Name)
+	// Get max value from the table
+	var maxVal int64
+	err := p.pool.QueryRow(ctx,
+		fmt.Sprintf("SELECT COALESCE(MAX(%q), 0) FROM %s.%q", identityCol, schema, t.Name)).Scan(&maxVal)
+	if err != nil {
+		return fmt.Errorf("getting max value for %s.%s: %w", t.Name, identityCol, err)
+	}
 
-	_, err := p.pool.Exec(ctx, sql)
+	if maxVal == 0 {
+		return nil // Empty table, no need to reset
+	}
+
+	// For GENERATED AS IDENTITY columns, use ALTER TABLE ... RESTART WITH
+	// This works for both SERIAL and IDENTITY columns
+	sql := fmt.Sprintf(`ALTER TABLE %s.%q ALTER COLUMN %q RESTART WITH %d`,
+		schema, t.Name, identityCol, maxVal+1)
+
+	_, err = p.pool.Exec(ctx, sql)
+	if err != nil {
+		// Fall back to pg_get_serial_sequence for SERIAL columns
+		fallbackSQL := fmt.Sprintf(`
+			SELECT setval(
+				pg_get_serial_sequence('"%s"."%s"', '%s'),
+				%d
+			)
+		`, schema, t.Name, identityCol, maxVal)
+		_, err = p.pool.Exec(ctx, fallbackSQL)
+	}
 	return err
 }
 
