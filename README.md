@@ -28,8 +28,8 @@ Tested on StackOverflow database dumps (Docker containers, same host):
 
 | Dataset | Rows | Duration | Throughput |
 |---------|------|----------|------------|
-| SO2010 | 19.3M | 2m 21s | 137,000 rows/sec |
-| SO2013 | 106.5M | 12m 25s | 143,000 rows/sec |
+| SO2010 | 19.3M | 51s | 378,000 rows/sec |
+| SO2013 | 106.5M | 6m 50s | 260,000 rows/sec |
 
 ## Installation
 
