@@ -23,6 +23,26 @@ type Job struct {
 	Partition *source.Partition
 }
 
+// TransferStats tracks timing statistics for profiling
+type TransferStats struct {
+	QueryTime time.Duration
+	ScanTime  time.Duration
+	WriteTime time.Duration
+	Rows      int64
+}
+
+func (s *TransferStats) String() string {
+	total := s.QueryTime + s.ScanTime + s.WriteTime
+	if total == 0 {
+		return "no data"
+	}
+	return fmt.Sprintf("query=%.1fs (%.0f%%), scan=%.1fs (%.0f%%), write=%.1fs (%.0f%%), rows=%d",
+		s.QueryTime.Seconds(), float64(s.QueryTime)/float64(total)*100,
+		s.ScanTime.Seconds(), float64(s.ScanTime)/float64(total)*100,
+		s.WriteTime.Seconds(), float64(s.WriteTime)/float64(total)*100,
+		s.Rows)
+}
+
 // Execute runs a transfer job using the optimal pagination strategy
 func Execute(
 	ctx context.Context,
@@ -31,7 +51,7 @@ func Execute(
 	cfg *config.Config,
 	job Job,
 	prog *progress.Tracker,
-) error {
+) (*TransferStats, error) {
 	// Truncate target on first partition or non-partitioned
 	if job.Partition == nil || job.Partition.PartitionID == 1 {
 		if err := tgtPool.TruncateTable(ctx, cfg.Target.Schema, job.Table.Name); err != nil {
@@ -88,7 +108,8 @@ func executeKeysetPagination(
 	job Job,
 	cols, colTypes []string,
 	prog *progress.Tracker,
-) error {
+) (*TransferStats, error) {
+	stats := &TransferStats{}
 	pkCol := job.Table.PrimaryKey[0]
 	colList := "[" + strings.Join(cols, "], [") + "]"
 
@@ -108,7 +129,7 @@ func executeKeysetPagination(
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return stats, ctx.Err()
 		default:
 		}
 
@@ -143,7 +164,7 @@ func executeKeysetPagination(
 					fmt.Sprintf("SELECT MIN([%s]) FROM [%s].[%s] %s", pkCol, job.Table.Schema, job.Table.Name, tableHint)).
 					Scan(&firstPK)
 				if err != nil || firstPK == nil {
-					return nil // Empty table
+					return stats, nil // Empty table
 				}
 				lastPK = decrementPK(firstPK)
 			}
@@ -160,15 +181,21 @@ func executeKeysetPagination(
 			}
 		}
 
+		// Time the query
+		queryStart := time.Now()
 		rows, err := db.QueryContext(ctx, query, args...)
+		stats.QueryTime += time.Since(queryStart)
 		if err != nil {
-			return fmt.Errorf("keyset query: %w", err)
+			return stats, fmt.Errorf("keyset query: %w", err)
 		}
 
+		// Time the scan
+		scanStart := time.Now()
 		chunk, newLastPK, err := scanRows(rows, cols, colTypes)
 		rows.Close()
+		stats.ScanTime += time.Since(scanStart)
 		if err != nil {
-			return fmt.Errorf("scanning rows: %w", err)
+			return stats, fmt.Errorf("scanning rows: %w", err)
 		}
 
 		if len(chunk) == 0 {
@@ -185,12 +212,16 @@ func executeKeysetPagination(
 		}
 		lastPK = chunk[len(chunk)-1][pkIdx]
 
+		// Time the write
+		writeStart := time.Now()
 		if err := writeChunk(ctx, pool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
-			return fmt.Errorf("writing chunk: %w", err)
+			return stats, fmt.Errorf("writing chunk: %w", err)
 		}
+		stats.WriteTime += time.Since(writeStart)
 
 		prog.Add(int64(len(chunk)))
 		totalTransferred += int64(len(chunk))
+		stats.Rows = totalTransferred
 
 		// Update lastPK for next iteration
 		if newLastPK != nil {
@@ -202,7 +233,7 @@ func executeKeysetPagination(
 		}
 	}
 
-	return nil
+	return stats, nil
 }
 
 // executeRowNumberPagination uses ROW_NUMBER for composite/varchar PKs
@@ -214,7 +245,8 @@ func executeRowNumberPagination(
 	job Job,
 	cols, colTypes []string,
 	prog *progress.Tracker,
-) error {
+) (*TransferStats, error) {
+	stats := &TransferStats{}
 	colList := "[" + strings.Join(cols, "], [") + "]"
 
 	// Build ORDER BY clause from PK columns (or all columns if no PK)
@@ -241,7 +273,7 @@ func executeRowNumberPagination(
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return stats, ctx.Err()
 		default:
 		}
 
@@ -264,34 +296,44 @@ func executeRowNumberPagination(
 			sql.Named("rowNumEnd", rowNum+int64(chunkSize)),
 		}
 
+		// Time the query
+		queryStart := time.Now()
 		rows, err := db.QueryContext(ctx, query, args...)
+		stats.QueryTime += time.Since(queryStart)
 		if err != nil {
-			return fmt.Errorf("row_number query: %w", err)
+			return stats, fmt.Errorf("row_number query: %w", err)
 		}
 
+		// Time the scan
+		scanStart := time.Now()
 		chunk, _, err := scanRows(rows, cols, colTypes)
 		rows.Close()
+		stats.ScanTime += time.Since(scanStart)
 		if err != nil {
-			return fmt.Errorf("scanning rows: %w", err)
+			return stats, fmt.Errorf("scanning rows: %w", err)
 		}
 
 		if len(chunk) == 0 {
 			break
 		}
 
+		// Time the write
+		writeStart := time.Now()
 		if err := writeChunk(ctx, pool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
-			return fmt.Errorf("writing chunk at row %d: %w", rowNum, err)
+			return stats, fmt.Errorf("writing chunk at row %d: %w", rowNum, err)
 		}
+		stats.WriteTime += time.Since(writeStart)
 
 		prog.Add(int64(len(chunk)))
 		rowNum += int64(len(chunk))
+		stats.Rows = rowNum
 
 		if len(chunk) < chunkSize {
 			break
 		}
 	}
 
-	return nil
+	return stats, nil
 }
 
 // scanRows scans database rows into a slice of values with proper type handling

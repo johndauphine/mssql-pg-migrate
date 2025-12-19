@@ -189,14 +189,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 		}
 	} else {
-		// Default: drop_recreate
-		fmt.Println("Creating target tables (drop and recreate)...")
+		// Default: drop_recreate (using UNLOGGED for speed, convert to LOGGED after transfer)
+		fmt.Println("Creating target tables (drop and recreate, UNLOGGED)...")
 		for _, t := range tables {
 			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("dropping table %s: %w", t.Name, err)
 			}
-			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+			if err := o.targetPool.CreateTableWithOptions(ctx, &t, o.config.Target.Schema, true); err != nil {
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("creating table %s: %w", t.FullName(), err)
 			}
@@ -295,6 +295,16 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	}
 	o.progress.SetTotal(totalRows)
 
+	// Stats collection per table
+	type tableStats struct {
+		mu    sync.Mutex
+		stats *transfer.TransferStats
+	}
+	statsMap := make(map[string]*tableStats)
+	for _, t := range tables {
+		statsMap[t.Name] = &tableStats{stats: &transfer.TransferStats{}}
+	}
+
 	// Execute jobs with worker pool
 	sem := make(chan struct{}, o.config.Migration.Workers)
 	var wg sync.WaitGroup
@@ -312,9 +322,21 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			err := transfer.Execute(ctx, o.sourcePool, o.targetPool, o.config, j, o.progress)
+			stats, err := transfer.Execute(ctx, o.sourcePool, o.targetPool, o.config, j, o.progress)
 			if err != nil {
 				errCh <- fmt.Errorf("transfer %s: %w", j.Table.FullName(), err)
+				return
+			}
+
+			// Aggregate stats per table
+			if stats != nil {
+				ts := statsMap[j.Table.Name]
+				ts.mu.Lock()
+				ts.stats.QueryTime += stats.QueryTime
+				ts.stats.ScanTime += stats.ScanTime
+				ts.stats.WriteTime += stats.WriteTime
+				ts.stats.Rows += stats.Rows
+				ts.mu.Unlock()
 			}
 		}(job)
 	}
@@ -328,30 +350,49 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		errs = append(errs, err)
 	}
 
+	o.progress.Finish()
+
+	// Print profiling stats
+	fmt.Println("\nTransfer Profile (per table):")
+	fmt.Println("------------------------------")
+	var totalQuery, totalScan, totalWrite time.Duration
+	for _, t := range tables {
+		ts := statsMap[t.Name]
+		if ts.stats.Rows > 0 {
+			fmt.Printf("%-25s %s\n", t.Name, ts.stats.String())
+			totalQuery += ts.stats.QueryTime
+			totalScan += ts.stats.ScanTime
+			totalWrite += ts.stats.WriteTime
+		}
+	}
+	totalTime := totalQuery + totalScan + totalWrite
+	if totalTime > 0 {
+		fmt.Println("------------------------------")
+		fmt.Printf("%-25s query=%.1fs (%.0f%%), scan=%.1fs (%.0f%%), write=%.1fs (%.0f%%)\n",
+			"TOTAL",
+			totalQuery.Seconds(), float64(totalQuery)/float64(totalTime)*100,
+			totalScan.Seconds(), float64(totalScan)/float64(totalTime)*100,
+			totalWrite.Seconds(), float64(totalWrite)/float64(totalTime)*100)
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("%d transfer errors: %v", len(errs), errs[0])
 	}
-
-	o.progress.Finish()
-
-	// Log pool stats after transfer
-	srcStats := o.sourcePool.Stats()
-	tgtStats := o.targetPool.Stats()
-	fmt.Printf("Pool stats - MSSQL: %d open (%d in use, %d idle), waits: %d (%.1fms avg)\n",
-		srcStats.OpenConnections, srcStats.InUse, srcStats.Idle, srcStats.WaitCount,
-		func() float64 {
-			if srcStats.WaitCount > 0 {
-				return float64(srcStats.WaitDuration) / float64(srcStats.WaitCount)
-			}
-			return 0
-		}())
-	fmt.Printf("Pool stats - PostgreSQL: %d total (%d acquired, %d idle), acquires: %d (empty: %d)\n",
-		tgtStats.TotalConns, tgtStats.AcquiredConns, tgtStats.IdleConns, tgtStats.AcquireCount, tgtStats.EmptyAcquireCount)
 
 	return nil
 }
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
+	// Phase 0: Convert UNLOGGED tables to LOGGED (for durability)
+	if o.config.Migration.TargetMode != "truncate" {
+		fmt.Println("  Converting tables to LOGGED...")
+		for _, t := range tables {
+			if err := o.targetPool.SetTableLogged(ctx, o.config.Target.Schema, t.Name); err != nil {
+				fmt.Printf("Warning: converting %s to LOGGED: %v\n", t.Name, err)
+			}
+		}
+	}
+
 	// Phase 1: Reset sequences
 	fmt.Println("  Resetting sequences...")
 	for _, t := range tables {

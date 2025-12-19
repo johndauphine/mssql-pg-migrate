@@ -10,10 +10,20 @@ import (
 
 // GenerateDDL generates CREATE TABLE statement for PostgreSQL
 func GenerateDDL(t *source.Table, targetSchema string) string {
+	return GenerateDDLWithOptions(t, targetSchema, false)
+}
+
+// GenerateDDLWithOptions generates CREATE TABLE with optional UNLOGGED
+func GenerateDDLWithOptions(t *source.Table, targetSchema string, unlogged bool) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%q (\n",
-		targetSchema, t.Name))
+	tableType := "TABLE"
+	if unlogged {
+		tableType = "UNLOGGED TABLE"
+	}
+
+	sb.WriteString(fmt.Sprintf("CREATE %s IF NOT EXISTS %s.%q (\n",
+		tableType, targetSchema, t.Name))
 
 	for i, col := range t.Columns {
 		if i > 0 {

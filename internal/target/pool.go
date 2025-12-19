@@ -90,7 +90,12 @@ func (p *Pool) CreateSchema(ctx context.Context, schema string) error {
 
 // CreateTable creates a table from source metadata
 func (p *Pool) CreateTable(ctx context.Context, t *source.Table, targetSchema string) error {
-	ddl := GenerateDDL(t, targetSchema)
+	return p.CreateTableWithOptions(ctx, t, targetSchema, false)
+}
+
+// CreateTableWithOptions creates a table with optional UNLOGGED
+func (p *Pool) CreateTableWithOptions(ctx context.Context, t *source.Table, targetSchema string, unlogged bool) error {
+	ddl := GenerateDDLWithOptions(t, targetSchema, unlogged)
 
 	_, err := p.pool.Exec(ctx, ddl)
 	if err != nil {
@@ -98,6 +103,13 @@ func (p *Pool) CreateTable(ctx context.Context, t *source.Table, targetSchema st
 	}
 
 	return nil
+}
+
+// SetTableLogged converts an UNLOGGED table to LOGGED
+func (p *Pool) SetTableLogged(ctx context.Context, schema, table string) error {
+	sql := fmt.Sprintf("ALTER TABLE %s.%q SET LOGGED", schema, table)
+	_, err := p.pool.Exec(ctx, sql)
+	return err
 }
 
 // TruncateTable truncates a table
