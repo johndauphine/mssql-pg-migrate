@@ -161,7 +161,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	throughput := float64(totalRows) / duration.Seconds()
 
 	o.state.CompleteRun(runID, "success")
-	o.notifier.MigrationCompleted(runID, duration, totalRows, throughput)
+	o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
 	fmt.Println("Migration complete!")
 
 	return nil

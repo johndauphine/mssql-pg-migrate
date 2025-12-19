@@ -91,24 +91,29 @@ func (n *Notifier) MigrationStarted(runID string, sourceDB, targetDB string, tab
 }
 
 // MigrationCompleted sends notification when migration completes successfully
-func (n *Notifier) MigrationCompleted(runID string, duration time.Duration, rowCount int64, throughput float64) error {
+func (n *Notifier) MigrationCompleted(runID string, startTime time.Time, duration time.Duration, tableCount int, rowCount int64, throughput float64) error {
 	if !n.IsEnabled() {
 		return nil
 	}
+
+	headerText := fmt.Sprintf("Migration pipeline completed successfully. Migrated %d tables with %s total rows. Throughput: %s rows/sec.",
+		tableCount, formatNumberWithCommas(rowCount), formatNumberWithCommas(int64(throughput)))
 
 	msg := SlackMessage{
 		Channel:   n.config.Channel,
 		Username:  n.getUsername(),
 		IconEmoji: ":white_check_mark:",
+		Text:      headerText,
 		Attachments: []SlackAttachment{
 			{
 				Color: "#36a64f", // green
-				Title: "Migration Completed Successfully",
 				Fields: []SlackField{
 					{Title: "Run ID", Value: runID, Short: true},
-					{Title: "Duration", Value: duration.Round(time.Second).String(), Short: true},
-					{Title: "Rows Transferred", Value: formatNumber(rowCount), Short: true},
-					{Title: "Throughput", Value: fmt.Sprintf("%.0f rows/sec", throughput), Short: true},
+					{Title: "Started", Value: startTime.UTC().Format("2006-01-02 15:04:05 UTC"), Short: true},
+					{Title: "Duration", Value: formatDuration(duration), Short: true},
+					{Title: "Tables", Value: fmt.Sprintf("%d", tableCount), Short: true},
+					{Title: "Total Rows", Value: formatNumberWithCommas(rowCount), Short: true},
+					{Title: "Throughput", Value: fmt.Sprintf("%s rows/sec", formatNumberWithCommas(int64(throughput))), Short: true},
 				},
 				Footer:    "mssql-pg-migrate",
 				Timestamp: time.Now().Unix(),
@@ -225,4 +230,37 @@ func formatNumber(n int64) string {
 		return fmt.Sprintf("%.1fK", float64(n)/1_000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+func formatNumberWithCommas(n int64) string {
+	str := fmt.Sprintf("%d", n)
+	if len(str) <= 3 {
+		return str
+	}
+
+	var result []byte
+	for i, c := range str {
+		if i > 0 && (len(str)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result)
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
