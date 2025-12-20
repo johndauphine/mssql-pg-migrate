@@ -309,7 +309,7 @@ func (p *MSSQLPool) CreateCheckConstraint(ctx context.Context, t *source.Table, 
 }
 
 // WriteChunk writes a chunk of data to the target table
-// Priority: 1) BULK INSERT (file-based, if configured), 2) Bulk Copy (TDS protocol), 3) Batch INSERT
+// Priority: 1) BULK INSERT (file-based, if configured), 2) Bulk Copy (TDS protocol)
 func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
@@ -317,14 +317,20 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 
 	// Use file-based BULK INSERT if temp dir is configured
 	if p.bulkInsertTempDir != "" {
-		return p.writeBulkInsert(ctx, schema, table, cols, rows)
+		err := p.writeBulkInsert(ctx, schema, table, cols, rows)
+		if err == nil {
+			return nil
+		}
+		// Fall back to TDS bulk copy on BULK INSERT failure
+		fmt.Printf("Warning: BULK INSERT failed, falling back to TDS bulk copy: %v\n", err)
 	}
 
-	// Use TDS bulk copy protocol (faster than batch INSERT)
+	// Use TDS bulk copy protocol
 	return p.writeBulkCopy(ctx, schema, table, cols, rows)
 }
 
 // writeBulkInsert writes data using SQL Server BULK INSERT
+// Returns error on failure (caller should fall back to TDS bulk copy)
 func (p *MSSQLPool) writeBulkInsert(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
 	// Create temp CSV file (write to local path)
 	fileName := fmt.Sprintf("%s_%s_%d.csv", schema, table, time.Now().UnixNano())
@@ -332,9 +338,7 @@ func (p *MSSQLPool) writeBulkInsert(ctx context.Context, schema, table string, c
 
 	f, err := os.Create(localFile)
 	if err != nil {
-		// Fall back to batch INSERT
-		fmt.Printf("Warning: failed to create temp file, falling back to batch INSERT: %v\n", err)
-		return p.writeBatchInsert(ctx, schema, table, cols, rows)
+		return fmt.Errorf("creating temp file: %w", err)
 	}
 	defer os.Remove(localFile)
 	defer f.Close()
@@ -380,16 +384,14 @@ func (p *MSSQLPool) writeBulkInsert(ctx context.Context, schema, table string, c
 
 	_, err = p.db.ExecContext(ctx, bulkSQL)
 	if err != nil {
-		// Fall back to batch INSERT on BULK INSERT failure
-		fmt.Printf("Warning: BULK INSERT failed, falling back to batch INSERT: %v\n", err)
-		return p.writeBatchInsert(ctx, schema, table, cols, rows)
+		return fmt.Errorf("BULK INSERT: %w", err)
 	}
 
 	return nil
 }
 
 // writeBulkCopy writes data using the TDS bulk copy protocol (mssql.CopyIn)
-// This is faster than batch INSERT and doesn't require file system access like BULK INSERT
+// This is the default write method - fast and doesn't require file system access
 func (p *MSSQLPool) writeBulkCopy(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
@@ -398,8 +400,7 @@ func (p *MSSQLPool) writeBulkCopy(ctx context.Context, schema, table string, col
 	// Start a transaction for bulk copy
 	txn, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		// Fall back to batch INSERT on transaction failure
-		return p.writeBatchInsert(ctx, schema, table, cols, rows)
+		return fmt.Errorf("beginning transaction: %w", err)
 	}
 
 	// Create fully qualified table name
@@ -409,9 +410,7 @@ func (p *MSSQLPool) writeBulkCopy(ctx context.Context, schema, table string, col
 	stmt, err := txn.PrepareContext(ctx, mssql.CopyIn(fullTableName, mssql.BulkOptions{Tablock: true}, cols...))
 	if err != nil {
 		txn.Rollback()
-		// Fall back to batch INSERT if bulk copy preparation fails
-		// This can happen if the driver doesn't support bulk copy for this table
-		return p.writeBatchInsert(ctx, schema, table, cols, rows)
+		return fmt.Errorf("preparing bulk copy: %w", err)
 	}
 
 	// Execute for each row
@@ -420,8 +419,7 @@ func (p *MSSQLPool) writeBulkCopy(ctx context.Context, schema, table string, col
 		if err != nil {
 			stmt.Close()
 			txn.Rollback()
-			// Fall back to batch INSERT on row execution failure
-			return p.writeBatchInsert(ctx, schema, table, cols, rows)
+			return fmt.Errorf("bulk copy row: %w", err)
 		}
 	}
 
@@ -430,73 +428,16 @@ func (p *MSSQLPool) writeBulkCopy(ctx context.Context, schema, table string, col
 	if err != nil {
 		stmt.Close()
 		txn.Rollback()
-		return p.writeBatchInsert(ctx, schema, table, cols, rows)
+		return fmt.Errorf("flushing bulk copy: %w", err)
 	}
 
 	if err = stmt.Close(); err != nil {
 		txn.Rollback()
-		return p.writeBatchInsert(ctx, schema, table, cols, rows)
+		return fmt.Errorf("closing bulk copy: %w", err)
 	}
 
 	if err = txn.Commit(); err != nil {
 		return fmt.Errorf("committing bulk copy: %w", err)
-	}
-
-	return nil
-}
-
-// writeBatchInsert writes data using multi-row INSERT statements
-func (p *MSSQLPool) writeBatchInsert(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
-	if len(rows) == 0 {
-		return nil
-	}
-
-	// SQL Server has a limit of 2100 parameters per query
-	// Calculate batch size based on number of columns
-	maxParams := 2000 // Leave some headroom
-	batchSize := maxParams / len(cols)
-	if batchSize > 1000 {
-		batchSize = 1000 // Cap at 1000 rows per INSERT
-	}
-	if batchSize < 1 {
-		batchSize = 1
-	}
-
-	// Quote column names
-	quotedCols := make([]string, len(cols))
-	for i, col := range cols {
-		quotedCols[i] = fmt.Sprintf("[%s]", col)
-	}
-	colList := strings.Join(quotedCols, ", ")
-
-	for i := 0; i < len(rows); i += batchSize {
-		end := i + batchSize
-		if end > len(rows) {
-			end = len(rows)
-		}
-		batch := rows[i:end]
-
-		// Build VALUES clause
-		valuesClauses := make([]string, len(batch))
-		args := make([]any, 0, len(batch)*len(cols))
-
-		for rowIdx, row := range batch {
-			placeholders := make([]string, len(row))
-			for colIdx, val := range row {
-				paramNum := rowIdx*len(cols) + colIdx + 1
-				placeholders[colIdx] = fmt.Sprintf("@p%d", paramNum)
-				args = append(args, sql.Named(fmt.Sprintf("p%d", paramNum), val))
-			}
-			valuesClauses[rowIdx] = "(" + strings.Join(placeholders, ", ") + ")"
-		}
-
-		insertSQL := fmt.Sprintf("INSERT INTO [%s].[%s] (%s) VALUES %s",
-			schema, table, colList, strings.Join(valuesClauses, ", "))
-
-		_, err := p.db.ExecContext(ctx, insertSQL, args...)
-		if err != nil {
-			return fmt.Errorf("batch insert: %w", err)
-		}
 	}
 
 	return nil
