@@ -95,6 +95,7 @@ type MigrationConfig struct {
 	SampleSize             int      `yaml:"sample_size"`              // Number of rows to sample for validation
 	ReadAheadBuffers       int      `yaml:"read_ahead_buffers"`       // Number of chunks to read ahead (default=8)
 	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
+	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
 }
 
 // Load reads configuration from a YAML file
@@ -216,6 +217,9 @@ func (c *Config) applyDefaults() {
 	if c.Migration.WriteAheadWriters == 0 {
 		c.Migration.WriteAheadWriters = 2 // Default: 2 parallel writers per job
 	}
+	if c.Migration.ParallelReaders == 0 {
+		c.Migration.ParallelReaders = 2 // Default: 2 parallel readers per job
+	}
 	if c.Migration.ReadAheadBuffers == 0 {
 		// Scale buffers: enough to keep writers fed, but within memory limits
 		// Formula: targetMemoryMB / workers / (chunkSize * 500 bytes avg)
@@ -230,9 +234,9 @@ func (c *Config) applyDefaults() {
 		}
 	}
 
-	// Auto-size connection pools based on workers and writers
-	// Each worker needs: 1 source connection + write_ahead_writers target connections
-	minSourceConns := c.Migration.Workers
+	// Auto-size connection pools based on workers, readers, and writers
+	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
+	minSourceConns := c.Migration.Workers * c.Migration.ParallelReaders
 	minTargetConns := c.Migration.Workers * c.Migration.WriteAheadWriters
 	if c.Migration.MaxConnections < minTargetConns {
 		c.Migration.MaxConnections = minTargetConns + 4 // Add headroom

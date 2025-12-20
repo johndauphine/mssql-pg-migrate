@@ -61,6 +61,78 @@ type TransferStats struct {
 	Rows      int64
 }
 
+// pkRange represents a primary key range for parallel reading
+type pkRange struct {
+	minPK any // inclusive (start from > minPK)
+	maxPK any // inclusive (read up to <= maxPK)
+}
+
+// splitPKRange divides a PK range into n sub-ranges for parallel reading
+// Note: minPK should be the actual minimum PK value; this function handles
+// the decrement needed for the > comparison in WHERE clauses
+func splitPKRange(minPK, maxPK any, n int) []pkRange {
+	if n <= 1 {
+		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
+	}
+
+	// Convert to int64 for range splitting
+	var minVal, maxVal int64
+	switch v := minPK.(type) {
+	case int:
+		minVal = int64(v)
+	case int32:
+		minVal = int64(v)
+	case int64:
+		minVal = v
+	default:
+		// Can't split non-integer PKs, use single range
+		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
+	}
+
+	switch v := maxPK.(type) {
+	case int:
+		maxVal = int64(v)
+	case int32:
+		maxVal = int64(v)
+	case int64:
+		maxVal = v
+	default:
+		return []pkRange{{minPK: minPK, maxPK: maxPK}}
+	}
+
+	// Calculate range size per reader
+	totalRange := maxVal - minVal
+	if totalRange <= 0 {
+		return []pkRange{{minPK: minPK, maxPK: maxPK}}
+	}
+
+	rangeSize := totalRange / int64(n)
+	if rangeSize < 1 {
+		rangeSize = 1
+		n = int(totalRange) // Reduce readers if range is small
+	}
+
+	ranges := make([]pkRange, 0, n)
+	for i := 0; i < n; i++ {
+		var rangeMin, rangeMax int64
+		if i == 0 {
+			rangeMin = minVal - 1 // First range: start before minVal for > comparison
+		} else {
+			rangeMin = minVal + int64(i)*rangeSize // Subsequent ranges: start at boundary
+		}
+		rangeMax = minVal + int64(i+1)*rangeSize
+		if i == n-1 {
+			rangeMax = maxVal // Last reader gets remainder
+		}
+		ranges = append(ranges, pkRange{
+			minPK: rangeMin,
+			maxPK: rangeMax,
+		})
+	}
+
+	return ranges
+}
+
 func (s *TransferStats) String() string {
 	total := s.QueryTime + s.ScanTime + s.WriteTime
 	if total == 0 {
@@ -377,35 +449,27 @@ func executeKeysetPagination(
 	syntax := newDBSyntax(srcPool.DBType())
 	colList := syntax.columnList(cols)
 	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
-
-	var initialLastPK any
-	var maxPK any
-
-	// Set partition bounds if applicable
-	if job.Partition != nil {
-		maxPK = job.Partition.MaxPK
-	}
-
-	// Use resume point if available, otherwise start from partition min
-	if resumeLastPK != nil {
-		initialLastPK = resumeLastPK
-	} else if job.Partition != nil {
-		// Start from one before minPK to include minPK in first chunk
-		initialLastPK = decrementPK(job.Partition.MinPK)
-	}
-
 	chunkSize := cfg.Migration.ChunkSize
 
-	// For non-partitioned tables, get initial PK
-	if initialLastPK == nil && job.Partition == nil {
-		var firstPK any
-		minQuery := fmt.Sprintf("SELECT MIN(%s) FROM %s %s",
-			syntax.quoteIdent(pkCol), syntax.qualifiedTable(job.Table.Schema, job.Table.Name), tableHint)
-		err := db.QueryRowContext(ctx, minQuery).Scan(&firstPK)
-		if err != nil || firstPK == nil {
+	// Get PK range for parallel readers
+	var minPKVal, maxPKVal any
+	if job.Partition != nil {
+		minPKVal = job.Partition.MinPK
+		maxPKVal = job.Partition.MaxPK
+	} else {
+		// For non-partitioned tables, get min and max PK
+		minMaxQuery := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s %s",
+			syntax.quoteIdent(pkCol), syntax.quoteIdent(pkCol),
+			syntax.qualifiedTable(job.Table.Schema, job.Table.Name), tableHint)
+		err := db.QueryRowContext(ctx, minMaxQuery).Scan(&minPKVal, &maxPKVal)
+		if err != nil || minPKVal == nil {
 			return stats, nil // Empty table
 		}
-		initialLastPK = decrementPK(firstPK)
+	}
+
+	// Use resume point if available
+	if resumeLastPK != nil {
+		minPKVal = resumeLastPK
 	}
 
 	// Find PK column index
@@ -418,78 +482,90 @@ func executeKeysetPagination(
 	}
 
 	// Create buffered channel for read-ahead pipeline
-	// ReadAheadBuffers controls how many chunks to read ahead (0 = synchronous)
 	bufferSize := cfg.Migration.ReadAheadBuffers
 	if bufferSize < 0 {
 		bufferSize = 0
 	}
 	chunkChan := make(chan chunkResult, bufferSize)
 
-	// Start reader goroutine
+	// Determine number of parallel readers
+	numReaders := cfg.Migration.ParallelReaders
+	if numReaders < 1 {
+		numReaders = 1
+	}
+
+	// Split PK range for parallel readers
+	pkRanges := splitPKRange(minPKVal, maxPKVal, numReaders)
+	actualReaders := len(pkRanges)
+
+	// Start parallel reader goroutines
+	var readerWg sync.WaitGroup
+	for _, pkr := range pkRanges {
+		readerWg.Add(1)
+		go func(rangeMinPK, rangeMaxPK any) {
+			defer readerWg.Done()
+			lastPK := rangeMinPK
+
+			for {
+				select {
+				case <-ctx.Done():
+					chunkChan <- chunkResult{err: ctx.Err()}
+					return
+				default:
+				}
+
+				// Always use bounded query for parallel readers
+				query := syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true)
+				args := syntax.buildKeysetArgs(lastPK, rangeMaxPK, chunkSize, true)
+
+				// Time the query
+				queryStart := time.Now()
+				rows, err := db.QueryContext(ctx, query, args...)
+				queryTime := time.Since(queryStart)
+				if err != nil {
+					chunkChan <- chunkResult{err: fmt.Errorf("keyset query: %w", err)}
+					return
+				}
+
+				// Time the scan
+				scanStart := time.Now()
+				chunk, _, err := scanRows(rows, cols, colTypes)
+				rows.Close()
+				scanTime := time.Since(scanStart)
+				if err != nil {
+					chunkChan <- chunkResult{err: fmt.Errorf("scanning rows: %w", err)}
+					return
+				}
+
+				if len(chunk) == 0 {
+					return // This reader is done
+				}
+
+				// Update lastPK for next iteration
+				lastPK = chunk[len(chunk)-1][pkIdx]
+
+				chunkChan <- chunkResult{
+					rows:      chunk,
+					lastPK:    lastPK,
+					queryTime: queryTime,
+					scanTime:  scanTime,
+					readEnd:   time.Now(),
+				}
+
+				if len(chunk) < chunkSize {
+					return // This reader is done
+				}
+			}
+		}(pkr.minPK, pkr.maxPK)
+	}
+
+	// Close chunkChan when all readers are done
 	go func() {
-		defer close(chunkChan)
-		lastPK := initialLastPK
-
-		for {
-			select {
-			case <-ctx.Done():
-				chunkChan <- chunkResult{err: ctx.Err()}
-				return
-			default:
-			}
-
-			var query string
-			var args []any
-
-			if job.Partition != nil {
-				query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true)
-				args = syntax.buildKeysetArgs(lastPK, maxPK, chunkSize, true)
-			} else {
-				query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, false)
-				args = syntax.buildKeysetArgs(lastPK, nil, chunkSize, false)
-			}
-
-			// Time the query
-			queryStart := time.Now()
-			rows, err := db.QueryContext(ctx, query, args...)
-			queryTime := time.Since(queryStart)
-			if err != nil {
-				chunkChan <- chunkResult{err: fmt.Errorf("keyset query: %w", err)}
-				return
-			}
-
-			// Time the scan
-			scanStart := time.Now()
-			chunk, _, err := scanRows(rows, cols, colTypes)
-			rows.Close()
-			scanTime := time.Since(scanStart)
-			if err != nil {
-				chunkChan <- chunkResult{err: fmt.Errorf("scanning rows: %w", err)}
-				return
-			}
-
-			if len(chunk) == 0 {
-				chunkChan <- chunkResult{done: true}
-				return
-			}
-
-			// Update lastPK for next iteration
-			lastPK = chunk[len(chunk)-1][pkIdx]
-
-			chunkChan <- chunkResult{
-				rows:      chunk,
-				lastPK:    lastPK,
-				queryTime: queryTime,
-				scanTime:  scanTime,
-				readEnd:   time.Now(),
-			}
-
-			if len(chunk) < chunkSize {
-				chunkChan <- chunkResult{done: true}
-				return
-			}
-		}
+		readerWg.Wait()
+		close(chunkChan)
 	}()
+
+	_ = actualReaders // Used for logging
 
 	// Parallel writers setup
 	numWriters := cfg.Migration.WriteAheadWriters
