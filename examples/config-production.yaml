@@ -1,0 +1,77 @@
+# Production configuration with all options
+#
+# Full-featured configuration for production migrations with:
+# - SSL/TLS encryption
+# - Slack notifications
+# - Data validation
+# - Table filtering
+#
+# Usage:
+#   export MSSQL_PASSWORD="secure-password"
+#   export PG_PASSWORD="secure-password"
+#   export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+#   ./mssql-pg-migrate -c examples/config-production.yaml run
+
+source:
+  type: mssql
+  host: sqlserver-prod.example.com
+  port: 1433
+  database: ProductionDB
+  user: migrate_user
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: "true"
+  trust_server_cert: false
+
+target:
+  type: postgres
+  host: postgres-prod.example.com
+  port: 5432
+  database: production_db
+  user: migrate_user
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: verify-full
+
+migration:
+  # Connection pools
+  max_mssql_connections: 20
+  max_pg_connections: 40
+
+  # Parallelism
+  workers: 16
+  chunk_size: 250000
+  max_partitions: 16
+  large_table_threshold: 10000000
+
+  # Table filtering - exclude temporary and staging tables
+  exclude_tables:
+    - temp_*
+    - staging_*
+    - __*
+    - audit_log
+
+  # Schema objects
+  create_indexes: true
+  create_foreign_keys: true
+  create_check_constraints: true
+
+  # Target table handling
+  target_mode: drop_recreate
+
+  # Consistency - use locks for consistent reads (slower but safe)
+  strict_consistency: true
+
+  # Validation - verify random samples after migration
+  sample_validation: true
+  sample_size: 500
+
+  # State persistence
+  data_dir: /var/lib/mssql-pg-migrate
+
+# Slack notifications
+slack:
+  enabled: true
+  webhook_url: ${SLACK_WEBHOOK_URL}
+  channel: "#data-migrations"
+  username: mssql-pg-migrate

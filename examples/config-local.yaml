@@ -1,0 +1,25 @@
+# Minimal configuration for local development
+#
+# For Docker-based local databases with relaxed security settings
+#
+# Usage:
+#   export MSSQL_PASSWORD="YourStrong@Passw0rd"
+#   export PG_PASSWORD="postgres"
+#   ./mssql-pg-migrate -c examples/config-local.yaml run
+
+source:
+  host: localhost
+  port: 1433
+  database: MyDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  encrypt: "false"
+  trust_server_cert: true
+
+target:
+  host: localhost
+  port: 5432
+  database: mydb
+  user: postgres
+  password: ${PG_PASSWORD}
+  ssl_mode: disable

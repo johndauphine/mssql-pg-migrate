@@ -171,95 +171,131 @@ migration:
 ./mssql-pg-migrate -c config.yaml resume
 ```
 
-## Configuration
+## Configuration Reference
 
-Full configuration options:
+The configuration file uses YAML format. Environment variables can be used with `${VAR_NAME}` syntax.
 
-```yaml
-source:
-  type: mssql                 # "mssql" (default) or "postgres"
-  host: localhost
-  port: 1433                  # Default: 1433 for mssql, 5432 for postgres
-  database: MyDatabase
-  user: sa
-  password: ${MSSQL_PASSWORD} # Environment variable
-  schema: dbo                 # Default: dbo for mssql, public for postgres
-  # SSL/TLS settings
-  ssl_mode: require           # PostgreSQL: disable, require, verify-ca, verify-full (default: require)
-  encrypt: "true"             # MSSQL: disable, false, true (default: true)
-  trust_server_cert: false    # MSSQL: trust server certificate without validation (default: false)
-  # Kerberos authentication (alternative to user/password)
-  auth: password              # "password" (default) or "kerberos"
-  # krb5_conf: /etc/krb5.conf # Path to krb5.conf (optional)
-  # keytab: /path/to/keytab   # Path to keytab file (optional)
-  # realm: EXAMPLE.COM        # Kerberos realm (optional)
-  # spn: MSSQLSvc/host:1433   # Service Principal Name for MSSQL (optional)
-  # gssencmode: prefer        # PostgreSQL GSSAPI encryption: disable, prefer, require
+### Source Database Settings
 
-target:
-  type: postgres              # "postgres" (default) or "mssql"
-  host: localhost
-  port: 5432                  # Default: 5432 for postgres, 1433 for mssql
-  database: mydb
-  user: postgres
-  password: ${PG_PASSWORD}
-  schema: public              # Default: public for postgres, dbo for mssql
-  # SSL/TLS settings
-  ssl_mode: require           # PostgreSQL: disable, require, verify-ca, verify-full (default: require)
-  encrypt: "true"             # MSSQL: disable, false, true (default: true)
-  trust_server_cert: false    # MSSQL: trust server certificate without validation (default: false)
+The `source` section configures the database to migrate FROM.
 
-migration:
-  # Connection pools (auto-sized if not specified)
-  max_mssql_connections: 18   # SQL Server pool size
-  max_pg_connections: 32      # PostgreSQL pool size
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `type` | No | `mssql` | Database type: `mssql` or `postgres` |
+| `host` | **Yes** | - | Database server hostname or IP address |
+| `port` | No | 1433 (mssql) / 5432 (postgres) | Database server port |
+| `database` | **Yes** | - | Database name to connect to |
+| `user` | Yes* | - | Username for authentication (*not required for Kerberos) |
+| `password` | Yes* | - | Password for authentication (*not required for Kerberos). Supports `${ENV_VAR}` syntax |
+| `schema` | No | `dbo` (mssql) / `public` (postgres) | Schema containing tables to migrate |
 
-  # Transfer settings (auto-tuned if not specified)
-  workers: 14                 # Parallel workers (default: CPU cores - 2)
-  chunk_size: 200000          # Rows per chunk (default: auto-scaled by RAM)
-  max_partitions: 14          # Max partitions for large tables (default: workers)
-  large_table_threshold: 5000000  # Tables larger than this get partitioned
+**SSL/TLS Settings (source):**
 
-  # Table filtering (glob patterns)
-  include_tables:             # Only migrate these tables (optional)
-    - Users
-    - Orders*
-  exclude_tables:             # Skip these tables
-    - __*
-    - temp_*
-    - audit_*
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `ssl_mode` | No | `require` | PostgreSQL SSL mode: `disable`, `require`, `verify-ca`, `verify-full` |
+| `encrypt` | No | `true` | SQL Server encryption: `disable`, `false`, `true` |
+| `trust_server_cert` | No | `false` | SQL Server: Skip certificate validation (use only for testing) |
 
-  # State persistence
-  data_dir: ~/.mssql-pg-migrate
+**Kerberos Settings (source):**
 
-  # Target table handling
-  target_mode: drop_recreate  # "drop_recreate" (default) or "truncate"
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `auth` | No | `password` | Authentication method: `password` or `kerberos` |
+| `krb5_conf` | No | System default | Path to krb5.conf file (e.g., `/etc/krb5.conf`) |
+| `keytab` | No | Credential cache | Path to keytab file for service account authentication |
+| `realm` | No | Auto-detected | Kerberos realm (e.g., `EXAMPLE.COM`) |
+| `spn` | No | Auto-detected | SQL Server Service Principal Name (e.g., `MSSQLSvc/host.example.com:1433`) |
+| `gssencmode` | No | `prefer` | PostgreSQL GSSAPI encryption: `disable`, `prefer`, `require` |
 
-  # Schema objects (all optional, default: true)
-  create_indexes: true
-  create_foreign_keys: true
-  create_check_constraints: true
+### Target Database Settings
 
-  # Consistency
-  strict_consistency: false   # Set true to disable NOLOCK
+The `target` section configures the database to migrate TO. It uses the same parameters as `source`.
 
-  # Validation
-  sample_validation: false    # Enable random row sampling
-  sample_size: 100            # Rows per table to sample
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `type` | No | `postgres` | Database type: `mssql` or `postgres` |
+| `host` | **Yes** | - | Database server hostname or IP address |
+| `port` | No | 5432 (postgres) / 1433 (mssql) | Database server port |
+| `database` | **Yes** | - | Database name to connect to |
+| `user` | Yes* | - | Username for authentication |
+| `password` | Yes* | - | Password for authentication |
+| `schema` | No | `public` (postgres) / `dbo` (mssql) | Target schema for migrated tables |
 
-  # Performance tuning (auto-tuned if not specified)
-  read_ahead_buffers: 8       # Chunks to buffer ahead (default: auto-scaled by RAM)
-  write_ahead_writers: 8      # Parallel writers per job (default: 2, use 8 for PG→MSSQL)
-  parallel_readers: 1         # Parallel readers per job (default: 2, use 1 for local DBs)
-  mssql_rows_per_batch: 50000 # MSSQL bulk copy optimizer hint (default: chunk_size)
+The same SSL/TLS and Kerberos settings are available for `target`.
 
-# Slack notifications (optional)
-slack:
-  enabled: true
-  webhook_url: ${SLACK_WEBHOOK_URL}
-  channel: "#data-engineering"
-  username: mssql-pg-migrate
-```
+### Migration Settings
+
+The `migration` section controls how data is transferred.
+
+**Connection Pool Settings:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `max_mssql_connections` | No | Auto-sized | Maximum SQL Server connection pool size |
+| `max_pg_connections` | No | Auto-sized | Maximum PostgreSQL connection pool size |
+
+**Parallelism Settings:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `workers` | No | CPU cores - 2 | Number of parallel transfer workers (min: 2, max: 32) |
+| `chunk_size` | No | Auto-scaled by RAM | Rows per chunk (100,000 - 500,000) |
+| `max_partitions` | No | Same as `workers` | Maximum partitions for large table parallelism |
+| `large_table_threshold` | No | 5,000,000 | Tables with more rows than this are partitioned |
+
+**Table Filtering:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `include_tables` | No | All tables | List of glob patterns for tables to include (e.g., `Users`, `Order*`) |
+| `exclude_tables` | No | None | List of glob patterns for tables to exclude (e.g., `temp_*`, `__*`) |
+
+**Target Table Handling:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `target_mode` | No | `drop_recreate` | How to handle existing tables: `drop_recreate` (drop and recreate) or `truncate` (keep structure, delete data) |
+| `data_dir` | No | `~/.mssql-pg-migrate` | Directory for state database and temporary files |
+
+**Schema Object Creation:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `create_indexes` | No | `true` | Create non-primary key indexes after data transfer |
+| `create_foreign_keys` | No | `true` | Create foreign key constraints after data transfer |
+| `create_check_constraints` | No | `true` | Create CHECK constraints after data transfer |
+
+**Consistency Settings:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `strict_consistency` | No | `false` | Use table locks instead of NOLOCK hints (slower but consistent) |
+
+**Validation Settings:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `sample_validation` | No | `false` | Enable random row sampling to verify data integrity |
+| `sample_size` | No | 100 | Number of random rows per table to verify |
+
+**Performance Tuning:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `read_ahead_buffers` | No | Auto-scaled (4-32) | Number of chunks to buffer ahead of writers |
+| `write_ahead_writers` | No | 2 | Parallel writers per job. Use 8 for PG→MSSQL |
+| `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
+| `mssql_rows_per_batch` | No | Same as `chunk_size` | SQL Server bulk copy batch size hint |
+
+### Slack Notification Settings
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `enabled` | No | `false` | Enable Slack notifications |
+| `webhook_url` | Yes (if enabled) | - | Slack incoming webhook URL |
+| `channel` | No | Webhook default | Channel to post to (e.g., `#data-engineering`) |
+| `username` | No | `mssql-pg-migrate` | Bot username for messages |
 
 ## Kerberos Authentication
 
@@ -324,6 +360,252 @@ klist
 
 # Run migration (no password needed)
 ./mssql-pg-migrate -c config.yaml run
+```
+
+## Example Configurations
+
+Ready-to-use example configuration files are available in the [`examples/`](examples/) directory:
+
+| File | Description |
+|------|-------------|
+| `config-mssql-to-pg.yaml` | SQL Server → PostgreSQL with password auth |
+| `config-mssql-to-pg-kerberos.yaml` | SQL Server → PostgreSQL with Kerberos |
+| `config-pg-to-mssql.yaml` | PostgreSQL → SQL Server with password auth |
+| `config-pg-to-mssql-kerberos.yaml` | PostgreSQL → SQL Server with Kerberos |
+| `config-local.yaml` | Minimal config for local Docker development |
+| `config-production.yaml` | Full production config with all options |
+
+### Example 1: SQL Server to PostgreSQL (Password Authentication)
+
+Basic migration from SQL Server to PostgreSQL using username/password:
+
+```yaml
+# config-mssql-to-pg.yaml
+source:
+  type: mssql
+  host: sqlserver.example.com
+  port: 1433
+  database: SourceDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}        # Set via: export MSSQL_PASSWORD="your-password"
+  schema: dbo
+  encrypt: "true"                    # Enable encryption (recommended)
+  trust_server_cert: false           # Validate server certificate
+
+target:
+  type: postgres
+  host: postgres.example.com
+  port: 5432
+  database: target_db
+  user: postgres
+  password: ${PG_PASSWORD}           # Set via: export PG_PASSWORD="your-password"
+  schema: public
+  ssl_mode: require                  # Enable SSL (recommended)
+
+migration:
+  workers: 8                         # Parallel workers
+  chunk_size: 200000                 # Rows per chunk
+  create_indexes: true               # Recreate indexes
+  create_foreign_keys: true          # Recreate foreign keys
+  target_mode: drop_recreate         # Drop and recreate tables
+```
+
+### Example 2: SQL Server to PostgreSQL (Kerberos Authentication)
+
+Enterprise migration using Kerberos - no passwords in config file:
+
+```yaml
+# config-mssql-to-pg-kerberos.yaml
+source:
+  type: mssql
+  host: sqlserver.corp.example.com
+  port: 1433
+  database: SourceDatabase
+  schema: dbo
+  auth: kerberos                     # Use Kerberos instead of password
+  user: svc_migrate@CORP.EXAMPLE.COM # Kerberos principal
+  keytab: /etc/mssql-migrate.keytab  # Service account keytab
+  realm: CORP.EXAMPLE.COM            # Kerberos realm
+  encrypt: "true"
+
+target:
+  type: postgres
+  host: postgres.corp.example.com
+  port: 5432
+  database: target_db
+  schema: public
+  auth: kerberos                     # Use Kerberos/GSSAPI
+  user: svc_migrate@CORP.EXAMPLE.COM
+  gssencmode: require                # Require GSSAPI encryption
+  ssl_mode: disable                  # SSL not needed with GSSAPI
+
+migration:
+  workers: 8
+  chunk_size: 200000
+  create_indexes: true
+  create_foreign_keys: true
+```
+
+### Example 3: PostgreSQL to SQL Server (Password Authentication)
+
+Reverse migration from PostgreSQL to SQL Server:
+
+```yaml
+# config-pg-to-mssql.yaml
+source:
+  type: postgres
+  host: postgres.example.com
+  port: 5432
+  database: source_db
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: require
+
+target:
+  type: mssql
+  host: sqlserver.example.com
+  port: 1433
+  database: TargetDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: "true"
+  trust_server_cert: false
+
+migration:
+  workers: 8
+  chunk_size: 200000
+  write_ahead_writers: 8             # Use 8 writers for PG→MSSQL (faster)
+  parallel_readers: 1                # Single reader per job
+  create_indexes: true
+  create_foreign_keys: true
+```
+
+### Example 4: PostgreSQL to SQL Server (Kerberos Authentication)
+
+```yaml
+# config-pg-to-mssql-kerberos.yaml
+source:
+  type: postgres
+  host: postgres.corp.example.com
+  port: 5432
+  database: source_db
+  schema: public
+  auth: kerberos
+  user: svc_migrate@CORP.EXAMPLE.COM
+  gssencmode: require
+  ssl_mode: disable
+
+target:
+  type: mssql
+  host: sqlserver.corp.example.com
+  port: 1433
+  database: TargetDatabase
+  schema: dbo
+  auth: kerberos
+  user: svc_migrate@CORP.EXAMPLE.COM
+  keytab: /etc/mssql-migrate.keytab
+  realm: CORP.EXAMPLE.COM
+  encrypt: "true"
+
+migration:
+  workers: 8
+  chunk_size: 200000
+  write_ahead_writers: 8
+  parallel_readers: 1
+```
+
+### Example 5: Minimal Configuration (Local Development)
+
+Simplest config for local Docker databases:
+
+```yaml
+# config-local.yaml
+source:
+  host: localhost
+  port: 1433
+  database: MyDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  encrypt: "false"                   # Disable encryption for local dev
+  trust_server_cert: true            # Trust self-signed certs
+
+target:
+  host: localhost
+  port: 5432
+  database: mydb
+  user: postgres
+  password: ${PG_PASSWORD}
+  ssl_mode: disable                  # Disable SSL for local dev
+```
+
+### Example 6: Production Configuration with All Options
+
+Full production configuration with Slack notifications and validation:
+
+```yaml
+# config-production.yaml
+source:
+  type: mssql
+  host: sqlserver-prod.example.com
+  port: 1433
+  database: ProductionDB
+  user: migrate_user
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: "true"
+  trust_server_cert: false
+
+target:
+  type: postgres
+  host: postgres-prod.example.com
+  port: 5432
+  database: production_db
+  user: migrate_user
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: verify-full              # Full certificate verification
+
+migration:
+  # Connection pools
+  max_mssql_connections: 20
+  max_pg_connections: 40
+
+  # Parallelism
+  workers: 16
+  chunk_size: 250000
+  max_partitions: 16
+  large_table_threshold: 10000000
+
+  # Table filtering
+  exclude_tables:
+    - temp_*
+    - staging_*
+    - __*
+    - audit_log
+
+  # Schema objects
+  create_indexes: true
+  create_foreign_keys: true
+  create_check_constraints: true
+
+  # Consistency
+  strict_consistency: true           # Use locks for consistent reads
+
+  # Validation
+  sample_validation: true            # Verify random samples
+  sample_size: 500                   # Check 500 rows per table
+
+  # State persistence
+  data_dir: /var/lib/mssql-pg-migrate
+
+slack:
+  enabled: true
+  webhook_url: ${SLACK_WEBHOOK_URL}
+  channel: "#data-migrations"
+  username: mssql-pg-migrate
+
 ```
 
 ## Usage

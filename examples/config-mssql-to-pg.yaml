@@ -1,0 +1,35 @@
+# SQL Server to PostgreSQL migration with password authentication
+#
+# Usage:
+#   export MSSQL_PASSWORD="your-mssql-password"
+#   export PG_PASSWORD="your-postgres-password"
+#   ./mssql-pg-migrate -c examples/config-mssql-to-pg.yaml run
+
+source:
+  type: mssql
+  host: sqlserver.example.com
+  port: 1433
+  database: SourceDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: "true"
+  trust_server_cert: false
+
+target:
+  type: postgres
+  host: postgres.example.com
+  port: 5432
+  database: target_db
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: require
+
+migration:
+  workers: 8
+  chunk_size: 200000
+  create_indexes: true
+  create_foreign_keys: true
+  create_check_constraints: true
+  target_mode: drop_recreate
