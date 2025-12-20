@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,6 +44,13 @@ type chunkResult struct {
 	readEnd   time.Time // when this chunk finished reading
 	err       error
 	done      bool // signals end of data
+}
+
+// writeResult holds the result of a parallel write operation
+type writeResult struct {
+	writeTime time.Duration
+	rowCount  int64
+	err       error
 }
 
 // TransferStats tracks timing statistics for profiling
@@ -482,16 +491,66 @@ func executeKeysetPagination(
 		}
 	}()
 
-	// Writer loop - consume chunks from channel and write
+	// Parallel writers setup
+	numWriters := cfg.Migration.WriteAheadWriters
+	if numWriters < 1 {
+		numWriters = 1
+	}
+
+	// Channel for dispatching write jobs to worker pool
+	writeJobChan := make(chan [][]any, bufferSize)
+
+	// Shared state for parallel writers
+	var totalWriteTime int64  // atomic, nanoseconds
+	var totalWritten int64    // atomic, rows written
+	var writeErr atomic.Pointer[error]
+	var writerWg sync.WaitGroup
+
+	// Writer cancellation context
+	writerCtx, cancelWriters := context.WithCancel(ctx)
+	defer cancelWriters()
+
+	// Start write workers
+	for i := 0; i < numWriters; i++ {
+		writerWg.Add(1)
+		go func() {
+			defer writerWg.Done()
+			for rows := range writeJobChan {
+				select {
+				case <-writerCtx.Done():
+					return
+				default:
+				}
+
+				writeStart := time.Now()
+				if err := writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows); err != nil {
+					writeErr.CompareAndSwap(nil, &err)
+					cancelWriters()
+					return
+				}
+				writeDuration := time.Since(writeStart)
+				atomic.AddInt64(&totalWriteTime, int64(writeDuration))
+
+				// Update progress atomically
+				rowCount := int64(len(rows))
+				atomic.AddInt64(&totalWritten, rowCount)
+				prog.Add(rowCount)
+			}
+		}()
+	}
+
+	// Main consumer loop - reads from chunkChan, dispatches to write pool
 	totalTransferred := resumeRowsDone
 	chunkCount := 0
-	const saveProgressEvery = 10
-	var lastPK any
 	var totalOverlap time.Duration
 	var lastWriteEnd time.Time
+	var lastPK any
 
+	// Process chunks and dispatch writes
 	for result := range chunkChan {
 		if result.err != nil {
+			cancelWriters()
+			close(writeJobChan)
 			return stats, result.err
 		}
 		if result.done {
@@ -508,36 +567,51 @@ func executeKeysetPagination(
 			overlap := lastWriteEnd.Sub(result.readEnd)
 			totalOverlap += overlap
 		}
-
-		// Time the write
-		writeStart := time.Now()
-		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, result.rows); err != nil {
-			return stats, fmt.Errorf("writing chunk: %w", err)
-		}
-		stats.WriteTime += time.Since(writeStart)
 		lastWriteEnd = time.Now()
+
+		// Dispatch to write pool
+		select {
+		case writeJobChan <- result.rows:
+		case <-writerCtx.Done():
+			close(writeJobChan)
+			if err := writeErr.Load(); err != nil {
+				return stats, fmt.Errorf("writing chunk: %w", *err)
+			}
+			return stats, writerCtx.Err()
+		}
 
 		// Log overlap stats periodically
 		if chunkCount > 0 && chunkCount%50 == 0 {
-			waitTime := writeStart.Sub(receiveTime)
-			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d\n",
-				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize)
+			waitTime := time.Since(receiveTime)
+			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d writers=%d\n",
+				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters)
 		}
 
-		prog.Add(int64(len(result.rows)))
-		totalTransferred += int64(len(result.rows))
-		stats.Rows = totalTransferred
 		chunkCount++
+	}
 
-		// Save progress periodically for chunk-level resume
-		if job.Saver != nil && job.TaskID > 0 && chunkCount%saveProgressEvery == 0 {
-			var partID *int
-			if job.Partition != nil {
-				partID = &job.Partition.PartitionID
-			}
-			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, lastPK, totalTransferred, job.Table.RowCount); err != nil {
-				fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
-			}
+	// Close write job channel and wait for writers to finish
+	close(writeJobChan)
+	writerWg.Wait()
+
+	// Check for write errors
+	if err := writeErr.Load(); err != nil {
+		return stats, fmt.Errorf("writing chunk: %w", *err)
+	}
+
+	// Aggregate stats
+	stats.WriteTime = time.Duration(atomic.LoadInt64(&totalWriteTime))
+	totalTransferred += atomic.LoadInt64(&totalWritten)
+	stats.Rows = totalTransferred
+
+	// Save final progress
+	if job.Saver != nil && job.TaskID > 0 && lastPK != nil {
+		var partID *int
+		if job.Partition != nil {
+			partID = &job.Partition.PartitionID
+		}
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, lastPK, totalTransferred, job.Table.RowCount); err != nil {
+			fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
 		}
 	}
 
@@ -672,16 +746,66 @@ func executeRowNumberPagination(
 		chunkChan <- chunkResult{done: true}
 	}()
 
-	// Writer loop - consume chunks from channel and write
+	// Parallel writers setup
+	numWriters := cfg.Migration.WriteAheadWriters
+	if numWriters < 1 {
+		numWriters = 1
+	}
+
+	// Channel for dispatching write jobs to worker pool
+	writeJobChan := make(chan [][]any, bufferSize)
+
+	// Shared state for parallel writers
+	var totalWriteTime int64 // atomic, nanoseconds
+	var totalWritten int64   // atomic, rows written
+	var writeErr atomic.Pointer[error]
+	var writerWg sync.WaitGroup
+
+	// Writer cancellation context
+	writerCtx, cancelWriters := context.WithCancel(ctx)
+	defer cancelWriters()
+
+	// Start write workers
+	for i := 0; i < numWriters; i++ {
+		writerWg.Add(1)
+		go func() {
+			defer writerWg.Done()
+			for rows := range writeJobChan {
+				select {
+				case <-writerCtx.Done():
+					return
+				default:
+				}
+
+				writeStart := time.Now()
+				if err := writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows); err != nil {
+					writeErr.CompareAndSwap(nil, &err)
+					cancelWriters()
+					return
+				}
+				writeDuration := time.Since(writeStart)
+				atomic.AddInt64(&totalWriteTime, int64(writeDuration))
+
+				// Update progress atomically
+				rowCount := int64(len(rows))
+				atomic.AddInt64(&totalWritten, rowCount)
+				prog.Add(rowCount)
+			}
+		}()
+	}
+
+	// Main consumer loop - reads from chunkChan, dispatches to write pool
 	chunkCount := 0
-	const saveProgressEvery = 10
 	totalTransferred := int64(0)
 	var currentRowNum int64
 	var totalOverlap time.Duration
 	var lastWriteEnd time.Time
 
+	// Process chunks and dispatch writes
 	for result := range chunkChan {
 		if result.err != nil {
+			cancelWriters()
+			close(writeJobChan)
 			return stats, result.err
 		}
 		if result.done {
@@ -698,41 +822,55 @@ func executeRowNumberPagination(
 			overlap := lastWriteEnd.Sub(result.readEnd)
 			totalOverlap += overlap
 		}
-
-		// Time the write
-		writeStart := time.Now()
-		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, result.rows); err != nil {
-			return stats, fmt.Errorf("writing chunk at row %d: %w", currentRowNum, err)
-		}
-		stats.WriteTime += time.Since(writeStart)
 		lastWriteEnd = time.Now()
+
+		// Dispatch to write pool
+		select {
+		case writeJobChan <- result.rows:
+		case <-writerCtx.Done():
+			close(writeJobChan)
+			if err := writeErr.Load(); err != nil {
+				return stats, fmt.Errorf("writing chunk: %w", *err)
+			}
+			return stats, writerCtx.Err()
+		}
 
 		// Log overlap stats periodically
 		if chunkCount > 0 && chunkCount%50 == 0 {
-			waitTime := writeStart.Sub(receiveTime)
-			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d\n",
-				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize)
+			waitTime := time.Since(receiveTime)
+			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d writers=%d\n",
+				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters)
 		}
 
-		prog.Add(int64(len(result.rows)))
-		totalTransferred += int64(len(result.rows))
-		stats.Rows = totalTransferred
 		chunkCount++
+	}
 
-		// Save progress periodically for chunk-level resume
-		if job.Saver != nil && job.TaskID > 0 && chunkCount%saveProgressEvery == 0 {
-			var partID *int
-			var partitionRows int64
-			if job.Partition != nil {
-				partID = &job.Partition.PartitionID
-				partitionRows = job.Partition.RowCount
-			} else {
-				partitionRows = job.Table.RowCount
-			}
-			// For ROW_NUMBER pagination, save rowNum as progress (not lastPK)
-			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, currentRowNum, totalTransferred, partitionRows); err != nil {
-				fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
-			}
+	// Close write job channel and wait for writers to finish
+	close(writeJobChan)
+	writerWg.Wait()
+
+	// Check for write errors
+	if err := writeErr.Load(); err != nil {
+		return stats, fmt.Errorf("writing chunk: %w", *err)
+	}
+
+	// Aggregate stats
+	stats.WriteTime = time.Duration(atomic.LoadInt64(&totalWriteTime))
+	totalTransferred += atomic.LoadInt64(&totalWritten)
+	stats.Rows = totalTransferred
+
+	// Save final progress
+	if job.Saver != nil && job.TaskID > 0 {
+		var partID *int
+		var partitionRows int64
+		if job.Partition != nil {
+			partID = &job.Partition.PartitionID
+			partitionRows = job.Partition.RowCount
+		} else {
+			partitionRows = job.Table.RowCount
+		}
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, currentRowNum, totalTransferred, partitionRows); err != nil {
+			fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
 		}
 	}
 

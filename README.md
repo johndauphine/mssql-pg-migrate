@@ -219,7 +219,8 @@ migration:
   sample_size: 100            # Rows per table to sample
 
   # Performance tuning
-  read_ahead_buffers: 2       # Chunks to read ahead (0=sync, default: 2)
+  read_ahead_buffers: 8       # Chunks to buffer for parallel writes (default: 8)
+  write_ahead_writers: 2      # Parallel writers per job (default: 2)
 
 # Slack notifications (optional)
 slack:
