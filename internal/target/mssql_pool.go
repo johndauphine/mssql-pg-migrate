@@ -3,10 +3,7 @@ package target
 import (
 	"context"
 	"database/sql"
-	"encoding/csv"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,11 +15,9 @@ import (
 
 // MSSQLPool manages a pool of SQL Server target connections
 type MSSQLPool struct {
-	db                *sql.DB
-	config            *config.TargetConfig
-	maxConns          int
-	bulkInsertTempDir string // Local path where CSV files are written
-	bulkInsertSQLPath string // Path as seen by SQL Server (for BULK INSERT command)
+	db       *sql.DB
+	config   *config.TargetConfig
+	maxConns int
 }
 
 // NewMSSQLPool creates a new SQL Server target connection pool
@@ -46,29 +41,11 @@ func NewMSSQLPool(cfg *config.TargetConfig, maxConns int) (*MSSQLPool, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	pool := &MSSQLPool{
-		db:                db,
-		config:            cfg,
-		maxConns:          maxConns,
-		bulkInsertTempDir: cfg.BulkInsertTempDir,
-		bulkInsertSQLPath: cfg.BulkInsertSQLPath,
-	}
-
-	// If SQL path not specified, use same as temp dir
-	if pool.bulkInsertSQLPath == "" {
-		pool.bulkInsertSQLPath = pool.bulkInsertTempDir
-	}
-
-	// Verify bulk insert temp dir is accessible if specified
-	if cfg.BulkInsertTempDir != "" {
-		if _, err := os.Stat(cfg.BulkInsertTempDir); os.IsNotExist(err) {
-			fmt.Printf("Warning: bulk_insert_temp_dir '%s' not accessible, falling back to batch INSERT\n", cfg.BulkInsertTempDir)
-			pool.bulkInsertTempDir = ""
-			pool.bulkInsertSQLPath = ""
-		}
-	}
-
-	return pool, nil
+	return &MSSQLPool{
+		db:       db,
+		config:   cfg,
+		maxConns: maxConns,
+	}, nil
 }
 
 // Close closes all connections in the pool
@@ -308,106 +285,8 @@ func (p *MSSQLPool) CreateCheckConstraint(ctx context.Context, t *source.Table, 
 	return err
 }
 
-// WriteChunk writes a chunk of data to the target table
-// Priority: 1) BULK INSERT (file-based, if configured), 2) Bulk Copy (TDS protocol)
+// WriteChunk writes a chunk of data to the target table using TDS bulk copy protocol
 func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
-	if len(rows) == 0 {
-		return nil
-	}
-
-	// Use file-based BULK INSERT if temp dir is configured
-	if p.bulkInsertTempDir != "" {
-		err := p.writeBulkInsert(ctx, schema, table, cols, rows)
-		if err == nil {
-			return nil
-		}
-		// Fall back to TDS bulk copy on BULK INSERT failure
-		fmt.Printf("Warning: BULK INSERT failed, falling back to TDS bulk copy: %v\n", err)
-	}
-
-	// Use TDS bulk copy protocol
-	return p.writeBulkCopy(ctx, schema, table, cols, rows)
-}
-
-// writeBulkInsert writes data using SQL Server BULK INSERT
-// Returns error on failure (caller should fall back to TDS bulk copy)
-func (p *MSSQLPool) writeBulkInsert(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
-	// Create temp CSV file (write to local path)
-	fileName := fmt.Sprintf("%s_%s_%d.csv", schema, table, time.Now().UnixNano())
-	localFile := filepath.Join(p.bulkInsertTempDir, fileName)
-
-	f, err := os.Create(localFile)
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	defer os.Remove(localFile)
-	defer f.Close()
-
-	writer := csv.NewWriter(f)
-
-	// Write header
-	if err := writer.Write(cols); err != nil {
-		return fmt.Errorf("writing CSV header: %w", err)
-	}
-
-	// Write rows
-	for _, row := range rows {
-		record := make([]string, len(row))
-		for i, val := range row {
-			record[i] = formatValueForCSV(val)
-		}
-		if err := writer.Write(record); err != nil {
-			return fmt.Errorf("writing CSV row: %w", err)
-		}
-	}
-	writer.Flush()
-
-	if err := writer.Error(); err != nil {
-		return fmt.Errorf("flushing CSV: %w", err)
-	}
-	f.Close() // Close before BULK INSERT
-
-	// Build SQL Server path (use bulkInsertSQLPath if different from local)
-	sqlFile := filepath.Join(p.bulkInsertSQLPath, fileName)
-
-	// Execute BULK INSERT in a transaction for atomicity
-	// If BULK INSERT fails partway through, the transaction rolls back
-	// so we can safely fall back to TDS bulk copy without duplicates
-	txn, err := p.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-
-	// FIELDQUOTE handles CSV-style quoted fields (SQL Server 2017+)
-	bulkSQL := fmt.Sprintf(`
-		BULK INSERT [%s].[%s]
-		FROM '%s'
-		WITH (
-			FORMAT = 'CSV',
-			FIELDTERMINATOR = ',',
-			ROWTERMINATOR = '\n',
-			FIELDQUOTE = '"',
-			FIRSTROW = 2,
-			TABLOCK
-		)
-	`, schema, table, sqlFile)
-
-	_, err = txn.ExecContext(ctx, bulkSQL)
-	if err != nil {
-		txn.Rollback()
-		return fmt.Errorf("BULK INSERT: %w", err)
-	}
-
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("committing BULK INSERT: %w", err)
-	}
-
-	return nil
-}
-
-// writeBulkCopy writes data using the TDS bulk copy protocol (mssql.CopyIn)
-// This is the default write method - fast and doesn't require file system access
-func (p *MSSQLPool) writeBulkCopy(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -538,26 +417,4 @@ func convertCheckDefinitionMSSQL(def string) string {
 	result = strings.ReplaceAll(result, "(false)", "(0)")
 
 	return result
-}
-
-// formatValueForCSV formats a value for CSV output
-func formatValueForCSV(val any) string {
-	if val == nil {
-		return ""
-	}
-
-	switch v := val.(type) {
-	case time.Time:
-		return v.Format("2006-01-02 15:04:05.9999999")
-	case []byte:
-		// Format as hex for binary data
-		return fmt.Sprintf("0x%X", v)
-	case bool:
-		if v {
-			return "1"
-		}
-		return "0"
-	default:
-		return fmt.Sprintf("%v", v)
-	}
 }

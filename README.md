@@ -137,34 +137,13 @@ target:
   user: sa
   password: ${MSSQL_PASSWORD}
   schema: dbo
-  # BULK INSERT configuration (optional but ~10x faster)
-  bulk_insert_temp_dir: "/path/on/host"           # Where tool writes CSV files
-  bulk_insert_sql_path: "\\\\server\\share\\path" # Path as seen by SQL Server
 
 migration:
   workers: 8
   chunk_size: 200000
 ```
 
-**Write methods for SQL Server target:**
-
-| Method | Throughput | Configuration |
-|--------|-----------|---------------|
-| BULK INSERT | ~150,000 rows/sec | Set `bulk_insert_temp_dir` |
-| Bulk Copy (TDS) | ~106,000 rows/sec | Default (no temp dir) |
-| Batch INSERT | ~16,000 rows/sec | Fallback only |
-
-**Write method selection (automatic):**
-1. **BULK INSERT**: Used when `bulk_insert_temp_dir` is configured. Fastest but requires file system access.
-2. **Bulk Copy (TDS)**: Default method. Uses native TDS bulk copy protocol (`mssql.CopyIn`). No file system required.
-3. **Batch INSERT**: Fallback if bulk copy fails. Slower but most compatible.
-
-**BULK INSERT notes:**
-- Requires shared file access between the migration tool and SQL Server
-- For Docker: mount a shared volume and set both paths:
-  - `bulk_insert_temp_dir`: host path where files are written
-  - `bulk_insert_sql_path`: path as seen by SQL Server container
-- Falls back to bulk copy if file creation fails
+**SQL Server target uses TDS Bulk Copy protocol** (`mssql.CopyIn`) for optimal performance (~130,000 rows/sec).
 
 2. Run the migration:
 
@@ -200,8 +179,6 @@ target:
   user: postgres
   password: ${PG_PASSWORD}
   schema: public              # Default: public for postgres, dbo for mssql
-  bulk_insert_temp_dir: ""    # For MSSQL target: local path for temp CSV files
-  bulk_insert_sql_path: ""    # For MSSQL target: path as seen by SQL Server (if different)
 
 migration:
   # Connection pools

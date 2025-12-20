@@ -37,15 +37,13 @@ type SourceConfig struct {
 
 // TargetConfig holds target database connection settings
 type TargetConfig struct {
-	Type              string `yaml:"type"`                 // "postgres" or "mssql" (default: postgres)
-	Host              string `yaml:"host"`
-	Port              int    `yaml:"port"`
-	Database          string `yaml:"database"`
-	User              string `yaml:"user"`
-	Password          string `yaml:"password"`
-	Schema            string `yaml:"schema"`
-	BulkInsertTempDir string `yaml:"bulk_insert_temp_dir"` // For MSSQL target: local path where CSV files are written
-	BulkInsertSQLPath string `yaml:"bulk_insert_sql_path"` // For MSSQL target: path as seen by SQL Server (if different from bulk_insert_temp_dir)
+	Type     string `yaml:"type"` // "postgres" or "mssql" (default: postgres)
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Database string `yaml:"database"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	Schema   string `yaml:"schema"`
 }
 
 // MigrationConfig holds migration behavior settings
