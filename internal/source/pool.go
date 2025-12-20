@@ -85,6 +85,13 @@ func (p *Pool) DBType() string {
 	return "mssql"
 }
 
+// GetRowCount returns the row count for a table
+func (p *Pool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
+	var count int64
+	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM [%s].[%s]", schema, table)).Scan(&count)
+	return count, err
+}
+
 // ExtractSchema extracts table metadata from the source database
 func (p *Pool) ExtractSchema(ctx context.Context, schema string) ([]Table, error) {
 	query := `

@@ -24,6 +24,9 @@ type SourcePool interface {
 	LoadForeignKeys(ctx context.Context, t *source.Table) error
 	LoadCheckConstraints(ctx context.Context, t *source.Table) error
 
+	// Row count (for validation)
+	GetRowCount(ctx context.Context, schema, table string) (int64, error)
+
 	// Pool info
 	MaxConns() int
 	DBType() string // "mssql" or "postgres"

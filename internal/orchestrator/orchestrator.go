@@ -653,18 +653,26 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 
 	var failed bool
 	for _, t := range o.tables {
-		targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
+		// Query fresh counts from both source and target (don't use cached t.RowCount)
+		sourceCount, err := o.sourcePool.GetRowCount(ctx, o.config.Source.Schema, t.Name)
 		if err != nil {
-			fmt.Printf("%-30s ERROR: %v\n", t.Name, err)
+			fmt.Printf("%-30s ERROR getting source count: %v\n", t.Name, err)
 			failed = true
 			continue
 		}
 
-		if targetCount == t.RowCount {
+		targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
+		if err != nil {
+			fmt.Printf("%-30s ERROR getting target count: %v\n", t.Name, err)
+			failed = true
+			continue
+		}
+
+		if targetCount == sourceCount {
 			fmt.Printf("%-30s OK %d rows\n", t.Name, targetCount)
 		} else {
 			fmt.Printf("%-30s FAIL source=%d target=%d (diff=%d)\n",
-				t.Name, t.RowCount, targetCount, t.RowCount-targetCount)
+				t.Name, sourceCount, targetCount, sourceCount-targetCount)
 			failed = true
 		}
 	}
