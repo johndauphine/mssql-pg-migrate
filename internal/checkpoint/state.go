@@ -59,7 +59,8 @@ func New(dataDir string) (*State, error) {
 	}
 
 	dbPath := filepath.Join(dataDir, "migrate.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)")
+	// WAL mode for better concurrency, busy_timeout to retry on lock contention
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)")
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}

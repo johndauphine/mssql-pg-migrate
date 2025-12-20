@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -220,6 +221,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Transfer data
 	fmt.Println("Transferring data...")
 	if err := o.transferAll(ctx, runID, tables); err != nil {
+		// If context was canceled (Ctrl+C), leave run as "running" so resume works
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			fmt.Println("Migration interrupted - run 'resume' to continue")
+			return fmt.Errorf("transferring data: %w", err)
+		}
 		o.state.CompleteRun(runID, "failed")
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("transferring data: %w", err)
