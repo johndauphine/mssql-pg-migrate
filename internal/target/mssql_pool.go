@@ -370,21 +370,36 @@ func (p *MSSQLPool) writeBulkInsert(ctx context.Context, schema, table string, c
 	// Build SQL Server path (use bulkInsertSQLPath if different from local)
 	sqlFile := filepath.Join(p.bulkInsertSQLPath, fileName)
 
-	// Execute BULK INSERT using the SQL Server-visible path
+	// Execute BULK INSERT in a transaction for atomicity
+	// If BULK INSERT fails partway through, the transaction rolls back
+	// so we can safely fall back to TDS bulk copy without duplicates
+	txn, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+
+	// FIELDQUOTE handles CSV-style quoted fields (SQL Server 2017+)
 	bulkSQL := fmt.Sprintf(`
 		BULK INSERT [%s].[%s]
 		FROM '%s'
 		WITH (
+			FORMAT = 'CSV',
 			FIELDTERMINATOR = ',',
 			ROWTERMINATOR = '\n',
+			FIELDQUOTE = '"',
 			FIRSTROW = 2,
 			TABLOCK
 		)
 	`, schema, table, sqlFile)
 
-	_, err = p.db.ExecContext(ctx, bulkSQL)
+	_, err = txn.ExecContext(ctx, bulkSQL)
 	if err != nil {
+		txn.Rollback()
 		return fmt.Errorf("BULK INSERT: %w", err)
+	}
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("committing BULK INSERT: %w", err)
 	}
 
 	return nil
