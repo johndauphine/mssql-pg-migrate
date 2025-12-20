@@ -508,20 +508,45 @@ func executeRowNumberPagination(
 	orderBy := strings.Join(pkCols, ", ")
 
 	chunkSize := cfg.Migration.ChunkSize
-	rowNum := resumeRowsDone // Resume from where we left off
+
+	// Determine row range for this job
+	var startRow, endRow int64
+	if job.Partition != nil && job.Partition.EndRow > 0 {
+		// Partitioned: use partition boundaries
+		startRow = job.Partition.StartRow
+		endRow = job.Partition.EndRow
+	} else {
+		// Non-partitioned: process entire table
+		startRow = 0
+		endRow = job.Table.RowCount
+	}
+
+	// Resume from saved progress if available
+	rowNum := startRow
+	if resumeRowsDone > 0 {
+		rowNum = resumeRowsDone
+	}
+
 	chunkCount := 0
 	const saveProgressEvery = 10
+	totalTransferred := int64(0)
 
-	for {
+	for rowNum < endRow {
 		select {
 		case <-ctx.Done():
 			return stats, ctx.Err()
 		default:
 		}
 
+		// Adjust chunk size if near end of partition
+		effectiveChunkSize := chunkSize
+		if rowNum+int64(chunkSize) > endRow {
+			effectiveChunkSize = int(endRow - rowNum)
+		}
+
 		// ROW_NUMBER pagination with direction-aware syntax
 		query := syntax.buildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint)
-		args := syntax.buildRowNumberArgs(rowNum, chunkSize)
+		args := syntax.buildRowNumberArgs(rowNum, effectiveChunkSize)
 
 		// Time the query
 		queryStart := time.Now()
@@ -553,22 +578,27 @@ func executeRowNumberPagination(
 
 		prog.Add(int64(len(chunk)))
 		rowNum += int64(len(chunk))
-		stats.Rows = rowNum
+		totalTransferred += int64(len(chunk))
+		stats.Rows = totalTransferred
 		chunkCount++
 
 		// Save progress periodically for chunk-level resume
 		if job.Saver != nil && job.TaskID > 0 && chunkCount%saveProgressEvery == 0 {
 			var partID *int
+			var partitionRows int64
 			if job.Partition != nil {
 				partID = &job.Partition.PartitionID
+				partitionRows = job.Partition.RowCount
+			} else {
+				partitionRows = job.Table.RowCount
 			}
 			// For ROW_NUMBER pagination, save rowNum as progress (not lastPK)
-			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, rowNum, rowNum, job.Table.RowCount); err != nil {
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, rowNum, totalTransferred, partitionRows); err != nil {
 				fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
 			}
 		}
 
-		if len(chunk) < chunkSize {
+		if len(chunk) < effectiveChunkSize {
 			break
 		}
 	}

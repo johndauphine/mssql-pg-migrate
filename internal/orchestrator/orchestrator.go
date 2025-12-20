@@ -339,7 +339,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	for _, t := range tables {
 		if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
-			// Partition large tables (only for keyset-compatible PKs)
+			// Partition large tables with keyset pagination (PK-based boundaries)
 			numPartitions := min(
 				int(t.RowCount/int64(o.config.Migration.ChunkSize))+1,
 				o.config.Migration.MaxPartitions,
@@ -353,6 +353,44 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			tableJobs[t.Name] = len(partitions)
 			for _, p := range partitions {
 				// Create task for chunk-level tracking
+				taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
+				taskID, _ := o.state.CreateTask(runID, "transfer", taskKey)
+
+				jobs = append(jobs, transfer.Job{
+					Table:     t,
+					Partition: &p,
+					TaskID:    taskID,
+					Saver:     progressSaver,
+				})
+			}
+		} else if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasPK() {
+			// Partition large tables with ROW_NUMBER pagination (row-based boundaries)
+			numPartitions := min(
+				int(t.RowCount/int64(o.config.Migration.ChunkSize))+1,
+				o.config.Migration.MaxPartitions,
+			)
+			if numPartitions < 1 {
+				numPartitions = 1
+			}
+
+			rowsPerPartition := t.RowCount / int64(numPartitions)
+			tableJobs[t.Name] = numPartitions
+
+			for i := 0; i < numPartitions; i++ {
+				startRow := int64(i) * rowsPerPartition
+				endRow := startRow + rowsPerPartition
+				if i == numPartitions-1 {
+					endRow = t.RowCount // Last partition gets remaining rows
+				}
+
+				p := source.Partition{
+					TableName:   t.Name,
+					PartitionID: i + 1,
+					StartRow:    startRow,
+					EndRow:      endRow,
+					RowCount:    endRow - startRow,
+				}
+
 				taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
 				taskID, _ := o.state.CreateTask(runID, "transfer", taskKey)
 
