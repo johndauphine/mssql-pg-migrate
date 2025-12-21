@@ -17,6 +17,7 @@ type StateBackend interface {
 	MarkTaskComplete(runID, taskKey string) error
 	GetCompletedTables(runID string) (map[string]bool, error)
 	GetRunStats(runID string) (total, pending, running, success, failed int, err error)
+	GetTasksWithProgress(runID string) ([]TaskWithProgress, error)
 
 	// Progress tracking (for chunk-level resume)
 	SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error

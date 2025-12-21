@@ -90,7 +90,7 @@ var availableCommands = []commandInfo{
 	{"/run", "Start migration (default: config.yaml)"},
 	{"/resume", "Resume an interrupted migration"},
 	{"/validate", "Validate migration row counts"},
-	{"/status", "Show migration status"},
+	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
 	{"/wizard", "Launch configuration wizard"},
 	{"/logs", "Save session logs to file"},
@@ -832,7 +832,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /resume [config_file] Resume an interrupted migration
   /resume --profile NAME Resume using a saved profile
   /validate             Validate migration
-  /status               Show migration status
+  /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
   /profile list         List saved profiles
@@ -937,8 +937,8 @@ Built with Go and Bubble Tea.`
 		return m.runValidateCmd(configFile, profileName)
 
 	case "/status":
-		configFile, profileName := parseConfigArgs(parts)
-		return m.runStatusCmd(configFile, profileName)
+		configFile, profileName, detailed := parseStatusArgs(parts)
+		return m.runStatusCmd(configFile, profileName, detailed)
 
 	case "/history":
 		configFile, profileName, runID := parseHistoryArgs(parts)
@@ -1060,7 +1060,7 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 	}
 }
 
-func (m Model) runStatusCmd(configFile, profileName string) tea.Cmd {
+func (m Model) runStatusCmd(configFile, profileName string, detailed bool) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
@@ -1072,8 +1072,13 @@ func (m Model) runStatusCmd(configFile, profileName string) tea.Cmd {
 		}
 		defer orch.Close()
 
-		// Capture stdout for ShowStatus
-		output, err := CaptureToString(orch.ShowStatus)
+		// Capture stdout for ShowStatus or ShowDetailedStatus
+		var output string
+		if detailed {
+			output, err = CaptureToString(orch.ShowDetailedStatus)
+		} else {
+			output, err = CaptureToString(orch.ShowStatus)
+		}
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error showing status: %v\n", err))
 		}
@@ -1200,6 +1205,33 @@ func parseHistoryArgs(parts []string) (string, string, string) {
 	}
 
 	return configFile, profileName, runID
+}
+
+func parseStatusArgs(parts []string) (string, string, bool) {
+	configFile := "config.yaml"
+	profileName := ""
+	detailed := false
+
+	for i := 1; i < len(parts); i++ {
+		arg := parts[i]
+		switch arg {
+		case "--detailed", "-d":
+			detailed = true
+		case "--profile":
+			if i+1 < len(parts) {
+				profileName = parts[i+1]
+				i++
+			}
+		default:
+			if strings.HasPrefix(arg, "@") {
+				configFile = arg[1:]
+			} else {
+				configFile = arg
+			}
+		}
+	}
+
+	return configFile, profileName, detailed
 }
 
 func parseProfileSaveArgs(parts []string) (string, string) {

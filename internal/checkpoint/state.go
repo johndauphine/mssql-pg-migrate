@@ -59,6 +59,21 @@ type TransferProgress struct {
 	UpdatedAt   time.Time
 }
 
+// TaskWithProgress combines task info with transfer progress
+type TaskWithProgress struct {
+	ID           int64
+	RunID        string
+	TaskType     string
+	TaskKey      string
+	Status       string
+	StartedAt    *time.Time
+	CompletedAt  *time.Time
+	RetryCount   int
+	ErrorMessage string
+	RowsDone     int64
+	RowsTotal    int64
+}
+
 // New creates a new state manager
 func New(dataDir string) (*State, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
@@ -657,6 +672,92 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		runs = append(runs, r)
 	}
 	return runs, nil
+}
+
+// GetAllTasks returns all tasks for a run with their progress
+func (s *State) GetAllTasks(runID string) ([]Task, error) {
+	rows, err := s.db.Query(`
+		SELECT t.id, t.run_id, t.task_type, t.task_key, t.status,
+		       t.started_at, t.completed_at, t.retry_count, t.max_retries, t.error_message
+		FROM tasks t
+		WHERE t.run_id = ?
+		ORDER BY t.task_type, t.task_key
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		var startedAt, completedAt, errorMsg sql.NullString
+		if err := rows.Scan(&t.ID, &t.RunID, &t.TaskType, &t.TaskKey, &t.Status,
+			&startedAt, &completedAt, &t.RetryCount, &t.MaxRetries, &errorMsg); err != nil {
+			return nil, err
+		}
+		if startedAt.Valid {
+			ts, _ := time.Parse("2006-01-02 15:04:05", startedAt.String)
+			t.StartedAt = &ts
+		}
+		if completedAt.Valid {
+			ts, _ := time.Parse("2006-01-02 15:04:05", completedAt.String)
+			t.CompletedAt = &ts
+		}
+		if errorMsg.Valid {
+			t.ErrorMessage = errorMsg.String
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
+// GetTasksWithProgress returns all tasks for a run with transfer progress info
+func (s *State) GetTasksWithProgress(runID string) ([]TaskWithProgress, error) {
+	rows, err := s.db.Query(`
+		SELECT t.id, t.run_id, t.task_type, t.task_key, t.status,
+		       t.started_at, t.completed_at, t.retry_count, t.error_message,
+		       tp.rows_done, tp.rows_total
+		FROM tasks t
+		LEFT JOIN transfer_progress tp ON t.id = tp.task_id
+		WHERE t.run_id = ?
+		ORDER BY t.task_type, t.task_key
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []TaskWithProgress
+	for rows.Next() {
+		var t TaskWithProgress
+		var startedAt, completedAt, errorMsg sql.NullString
+		var rowsDone, rowsTotal sql.NullInt64
+		if err := rows.Scan(&t.ID, &t.RunID, &t.TaskType, &t.TaskKey, &t.Status,
+			&startedAt, &completedAt, &t.RetryCount, &errorMsg,
+			&rowsDone, &rowsTotal); err != nil {
+			return nil, err
+		}
+		if startedAt.Valid {
+			ts, _ := time.Parse("2006-01-02 15:04:05", startedAt.String)
+			t.StartedAt = &ts
+		}
+		if completedAt.Valid {
+			ts, _ := time.Parse("2006-01-02 15:04:05", completedAt.String)
+			t.CompletedAt = &ts
+		}
+		if errorMsg.Valid {
+			t.ErrorMessage = errorMsg.String
+		}
+		if rowsDone.Valid {
+			t.RowsDone = rowsDone.Int64
+		}
+		if rowsTotal.Valid {
+			t.RowsTotal = rowsTotal.Int64
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
 }
 
 // GetRunByID returns a specific run by ID

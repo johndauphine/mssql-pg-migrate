@@ -367,6 +367,31 @@ func (fs *FileState) GetAllRuns() ([]Run, error) {
 	return nil, nil
 }
 
+// GetTasksWithProgress returns all tasks for a run with transfer progress info.
+func (fs *FileState) GetTasksWithProgress(runID string) ([]TaskWithProgress, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if fs.state.RunID != runID {
+		return nil, nil
+	}
+
+	var tasks []TaskWithProgress
+	for key, ts := range fs.state.Tables {
+		tasks = append(tasks, TaskWithProgress{
+			ID:           ts.TaskID,
+			RunID:        runID,
+			TaskType:     "transfer",
+			TaskKey:      key,
+			Status:       ts.Status,
+			ErrorMessage: ts.Error,
+			RowsDone:     ts.RowsDone,
+			RowsTotal:    ts.RowsTotal,
+		})
+	}
+	return tasks, nil
+}
+
 // GetRunByID returns the run if it matches.
 func (fs *FileState) GetRunByID(runID string) (*Run, error) {
 	fs.mu.RLock()
