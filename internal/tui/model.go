@@ -146,7 +146,6 @@ func wrapLine(line string, width int) string {
 			if currentLine != "" {
 				result.WriteString(currentLine)
 				result.WriteString("\n")
-				currentLine = ""
 			}
 			// If the word itself is longer than width, split it
 			for len(word) > width {
@@ -611,16 +610,7 @@ func (m Model) View() string {
 	// Let's assume we can overlay it or just append it?
 	// Appending it requires line-by-line join.
 
-	vpLines := strings.Split(m.viewport.View(), "\n")
-	// Pad or truncate vpLines to match visibleLines
-	for len(vpLines) < visibleLines {
-		vpLines = append(vpLines, "")
-	}
-
-	var viewWithBar []string
-	for i := 0; i < visibleLines && i < len(vpLines); i++ {
-		viewWithBar = append(viewWithBar, vpLines[i]+" "+bar[i])
-	}
+	_ = bar // Scrollbar rendering prepared but not yet integrated
 
 	suggestionsView := ""
 	if len(m.suggestions) > 0 {
