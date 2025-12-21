@@ -92,4 +92,11 @@ var (
 
 	styleScrollbarHandle = lipgloss.NewStyle().
 				Foreground(colorPurple)
+
+	styleShellCommand = lipgloss.NewStyle().
+				Foreground(colorTeal).
+				Bold(true)
+
+	styleShellOutput = lipgloss.NewStyle().
+			Foreground(colorLightGray)
 )

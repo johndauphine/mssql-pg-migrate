@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -65,10 +67,6 @@ type Model struct {
 	suggestionIdx int      // Currently selected suggestion index
 	lastInput     string   // Last input value to prevent unnecessary suggestion regeneration
 
-	// Migration state
-	migrationRunning bool               // True while a migration is in progress
-	migrationCancel  context.CancelFunc // Cancel function for running migration
-
 	// Wizard state
 	mode        sessionMode
 	step        wizardStep
@@ -108,7 +106,21 @@ type WizardFinishedMsg struct {
 
 // MigrationDoneMsg signals that a migration has completed
 type MigrationDoneMsg struct {
+	Label  string // Profile name or config file
 	Output string
+}
+
+// ShellOutputMsg carries output from a shell command
+type ShellOutputMsg struct {
+	Command string
+	Output  string
+	Error   error
+}
+
+// TUIOutputMsg carries output from a TUI command (wrapped in purple box)
+type TUIOutputMsg struct {
+	Command string
+	Output  string
 }
 
 // activeMigrationCancel holds the cancel function for the currently running migration.
@@ -283,7 +295,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			// If a migration is running, cancel it instead of quitting
-			if m.migrationRunning && activeMigrationCancel != nil {
+			if activeMigrationCancel != nil {
 				activeMigrationCancel()
 				m.logBuffer += styleSystemOutput.Render("Cancelling migration... please wait") + "\n"
 				m.viewport.SetContent(m.logBuffer)
@@ -306,12 +318,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Reset()
 				m.history = append(m.history, value)
 				m.historyIdx = len(m.history)
-
-				// Check if this is a migration command and set the running flag
-				cmd := strings.Fields(value)[0]
-				if cmd == "/run" || cmd == "/resume" {
-					m.migrationRunning = true
-				}
 
 				return m, m.handleCommand(value)
 			}
@@ -377,44 +383,195 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 
 	case MigrationDoneMsg:
-		// Migration completed - clear the running state
-		m.migrationRunning = false
-		activeMigrationCancel = nil
-		// Process the output the same way as OutputMsg
-		m.lineBuffer += msg.Output
-
-		// Calculate wrap width (viewport width minus prefix and margins)
-		wrapWidth := m.viewport.Width - 4
+		// Calculate wrap width and max height (account for border padding)
+		wrapWidth := m.viewport.Width - 8
 		if wrapWidth < 20 {
-			wrapWidth = 80 // Fallback for uninitialized viewport
+			wrapWidth = 72
+		}
+		maxLines := (m.viewport.Height / 2) - 2 // Allow 2 boxes on screen
+		if maxLines < 5 {
+			maxLines = 5
 		}
 
-		for {
-			newlineIdx := strings.Index(m.lineBuffer, "\n")
-			if newlineIdx == -1 {
-				break
-			}
-			line := m.lineBuffer[:newlineIdx]
-			m.lineBuffer = m.lineBuffer[newlineIdx+1:]
+		// Build the content for the box
+		var contentLines []string
+
+		// Add label header if present
+		if msg.Label != "" {
+			contentLines = append(contentLines, lipgloss.NewStyle().Foreground(colorPurple).Bold(true).Render(msg.Label))
+		}
+
+		lines := strings.Split(strings.TrimRight(msg.Output, "\n"), "\n")
+		for _, line := range lines {
 			if line == "" {
 				continue
 			}
 
-			// Wrap long lines before styling
+			// Style based on content
+			lowerText := strings.ToLower(line)
+			isError := strings.Contains(lowerText, "error") ||
+				(strings.Contains(lowerText, "fail") && !strings.Contains(lowerText, "0 failed")) ||
+				strings.Contains(lowerText, "obsolete")
+
 			wrappedLines := strings.Split(wrapLine(line, wrapWidth), "\n")
 			for _, wrappedLine := range wrappedLines {
-				// Style the line based on content
-				var styledLine string
-				if strings.Contains(line, "Error") || strings.Contains(line, "failed") || strings.Contains(line, "obsolete") {
-					styledLine = styleError.Render("✖ " + wrappedLine)
-				} else if strings.Contains(line, "success") || strings.Contains(line, "completed") {
-					styledLine = styleSuccess.Render("✔ " + wrappedLine)
+				if isError {
+					contentLines = append(contentLines, styleError.Render(wrappedLine))
+				} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "completed") {
+					contentLines = append(contentLines, styleSuccess.Render(wrappedLine))
 				} else {
-					styledLine = styleSystemOutput.Render("  " + wrappedLine)
+					contentLines = append(contentLines, styleSystemOutput.Render(wrappedLine))
 				}
-				m.logBuffer += styledLine + "\n"
 			}
 		}
+
+		// Truncate if too many lines
+		truncated := false
+		hiddenLines := 0
+		if len(contentLines) > maxLines {
+			hiddenLines = len(contentLines) - maxLines + 1 // +1 for the "more" line
+			contentLines = contentLines[:maxLines-1]
+			truncated = true
+		}
+
+		boxContent := strings.Join(contentLines, "\n")
+		if truncated {
+			boxContent += "\n" + lipgloss.NewStyle().Foreground(colorGray).Italic(true).Render(fmt.Sprintf("... %d more lines (scroll up to see full output)", hiddenLines))
+		}
+
+		// Create bordered box with purple border
+		boxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
+			Padding(0, 1).
+			Width(m.viewport.Width - 4)
+
+		m.logBuffer += boxStyle.Render(boxContent) + "\n"
+		m.viewport.SetContent(m.logBuffer)
+		m.viewport.GotoBottom()
+
+	case ShellOutputMsg:
+		// Calculate wrap width and max height
+		wrapWidth := m.viewport.Width - 8
+		if wrapWidth < 20 {
+			wrapWidth = 72
+		}
+		maxLines := (m.viewport.Height / 2) - 2
+		if maxLines < 5 {
+			maxLines = 5
+		}
+
+		// Build content lines
+		var contentLines []string
+
+		// Add command header
+		contentLines = append(contentLines, styleShellCommand.Render("$ "+msg.Command))
+
+		// Add error if any
+		if msg.Error != nil {
+			errText := wrapLine(msg.Error.Error(), wrapWidth)
+			contentLines = append(contentLines, styleError.Render(errText))
+		}
+
+		// Add output
+		if msg.Output != "" {
+			lines := strings.Split(strings.TrimRight(msg.Output, "\n"), "\n")
+			for _, line := range lines {
+				wrappedLines := strings.Split(wrapLine(line, wrapWidth), "\n")
+				for _, wrappedLine := range wrappedLines {
+					contentLines = append(contentLines, styleShellOutput.Render(wrappedLine))
+				}
+			}
+		}
+
+		// Truncate if too many lines
+		truncated := false
+		hiddenLines := 0
+		if len(contentLines) > maxLines {
+			hiddenLines = len(contentLines) - maxLines + 1
+			contentLines = contentLines[:maxLines-1]
+			truncated = true
+		}
+
+		boxContent := strings.Join(contentLines, "\n")
+		if truncated {
+			boxContent += "\n" + lipgloss.NewStyle().Foreground(colorGray).Italic(true).Render(fmt.Sprintf("... %d more lines (scroll up to see full output)", hiddenLines))
+		}
+
+		// Create bordered box
+		boxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorTeal).
+			Padding(0, 1).
+			Width(m.viewport.Width - 4)
+
+		m.logBuffer += boxStyle.Render(boxContent) + "\n"
+
+		m.viewport.SetContent(m.logBuffer)
+		m.viewport.GotoBottom()
+
+	case TUIOutputMsg:
+		// Calculate wrap width and max height
+		wrapWidth := m.viewport.Width - 8
+		if wrapWidth < 20 {
+			wrapWidth = 72
+		}
+		maxLines := (m.viewport.Height / 2) - 2
+		if maxLines < 5 {
+			maxLines = 5
+		}
+
+		// Build content lines
+		var contentLines []string
+
+		// Add command header if present
+		if msg.Command != "" {
+			contentLines = append(contentLines, lipgloss.NewStyle().Foreground(colorPurple).Bold(true).Render(msg.Command))
+		}
+
+		// Add output with styling
+		lines := strings.Split(strings.TrimRight(msg.Output, "\n"), "\n")
+		for _, line := range lines {
+			// Style based on content
+			lowerText := strings.ToLower(line)
+			isError := strings.Contains(lowerText, "error") ||
+				(strings.Contains(lowerText, "fail") && !strings.Contains(lowerText, "0 failed"))
+
+			wrappedLines := strings.Split(wrapLine(line, wrapWidth), "\n")
+			for _, wrappedLine := range wrappedLines {
+				if isError {
+					contentLines = append(contentLines, styleError.Render(wrappedLine))
+				} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "passed") || strings.Contains(lowerText, "complete") {
+					contentLines = append(contentLines, styleSuccess.Render(wrappedLine))
+				} else {
+					contentLines = append(contentLines, styleSystemOutput.Render(wrappedLine))
+				}
+			}
+		}
+
+		// Truncate if too many lines
+		truncated := false
+		hiddenLines := 0
+		if len(contentLines) > maxLines {
+			hiddenLines = len(contentLines) - maxLines + 1
+			contentLines = contentLines[:maxLines-1]
+			truncated = true
+		}
+
+		boxContent := strings.Join(contentLines, "\n")
+		if truncated {
+			boxContent += "\n" + lipgloss.NewStyle().Foreground(colorGray).Italic(true).Render(fmt.Sprintf("... %d more lines (scroll up to see full output)", hiddenLines))
+		}
+
+		// Create bordered box with purple border
+		boxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
+			Padding(0, 1).
+			Width(m.viewport.Width - 4)
+
+		m.logBuffer += boxStyle.Render(boxContent) + "\n"
+
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
 
@@ -715,6 +872,16 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 		return nil
 	}
 
+	// Handle shell commands (! prefix)
+	if strings.HasPrefix(cmdStr, "!") {
+		shellCmd := strings.TrimPrefix(cmdStr, "!")
+		shellCmd = strings.TrimSpace(shellCmd)
+		if shellCmd == "" {
+			return func() tea.Msg { return TUIOutputMsg{Command: "!", Output: "Usage: !<command> (e.g., !ls -la)"} }
+		}
+		return m.runShellCmd(shellCmd)
+	}
+
 	cmd := parts[0]
 
 	// Helper to extract config file from args, supporting @/path/to/file syntax
@@ -756,35 +923,36 @@ Available Commands:
   /logs                 Save session logs to a file for analysis
   /clear                Clear screen
   /quit                 Exit application
-  
+
+Shell Mode:
+  !<command>            Execute a shell command (e.g., !ls -la, !pwd)
+
   Note: You can use @/path/to/file for config files.
 `
-		return func() tea.Msg { return OutputMsg(help) }
+		return func() tea.Msg { return TUIOutputMsg{Command: "/help", Output: help} }
 
 	case "/logs":
 		logFile := "session.log"
 		err := os.WriteFile(logFile, []byte(m.logBuffer), 0644)
 		if err != nil {
-			return func() tea.Msg { return OutputMsg(fmt.Sprintf("Error saving logs: %v\n", err)) }
+			return func() tea.Msg { return TUIOutputMsg{Command: "/logs", Output: fmt.Sprintf("Error saving logs: %v", err)} }
 		}
-		return func() tea.Msg { return OutputMsg(fmt.Sprintf("Logs saved to %s\n", logFile)) }
+		return func() tea.Msg { return TUIOutputMsg{Command: "/logs", Output: fmt.Sprintf("Logs saved to %s", logFile)} }
 
 	case "/about":
-		about := `
-  MSSQL-PG-MIGRATE v1.10.0
-  
-  A high-performance data migration tool for moving data 
-  from SQL Server to PostgreSQL (and vice-versa).
-  
-  Features:
-  - Parallel transfer with auto-tuning
-  - Resume capability (chunk-level)
-  - Data validation
-  - Configuration wizard
-  
-  Built with Go and Bubble Tea.
-`
-		return func() tea.Msg { return OutputMsg(about) }
+		about := `MSSQL-PG-MIGRATE v1.12.0
+
+A high-performance data migration tool for moving data
+from SQL Server to PostgreSQL (and vice-versa).
+
+Features:
+- Parallel transfer with auto-tuning
+- Resume capability (chunk-level)
+- Data validation
+- Configuration wizard
+
+Built with Go and Bubble Tea.`
+		return func() tea.Msg { return TUIOutputMsg{Command: "/about", Output: about} }
 
 	case "/wizard":
 		m.mode = modeWizard
@@ -837,33 +1005,59 @@ Available Commands:
 		return m.handleProfileCommand(parts)
 
 	default:
-		return func() tea.Msg { return OutputMsg("Unknown command: " + cmd + "\n") }
+		return func() tea.Msg { return TUIOutputMsg{Command: cmd, Output: "Unknown command. Type /help for available commands."} }
 	}
 }
 
 // Wrappers for Orchestrator actions
 
+func (m Model) runShellCmd(command string) tea.Cmd {
+	return func() tea.Msg {
+		// Execute the command using the shell
+		cmd := exec.Command("sh", "-c", command)
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		cmd.Dir = m.cwd
+
+		err := cmd.Run()
+
+		// Combine stdout and stderr
+		output := stdout.String()
+		if stderr.Len() > 0 {
+			if output != "" {
+				output += "\n"
+			}
+			output += stderr.String()
+		}
+
+		return ShellOutputMsg{
+			Command: command,
+			Output:  output,
+			Error:   err,
+		}
+	}
+}
+
 func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
-		// Output to the view
-		origin := "config: " + configFile
+		// Determine label for this migration
+		label := "/run " + configFile
 		if profileName != "" {
-			origin = "profile: " + profileName
+			label = "/run --profile " + profileName
 		}
-		out := fmt.Sprintf("Running migration with %s\n", origin)
 
 		// Load config
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error loading config: %v\n", err)}
+			return MigrationDoneMsg{Label: label, Output: fmt.Sprintf("Error loading config: %v", err)}
 		}
 
 		// Create orchestrator
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
+			return MigrationDoneMsg{Label: label, Output: fmt.Sprintf("Error initializing orchestrator: %v", err)}
 		}
 		defer orch.Close()
 		if profileName != "" {
@@ -879,31 +1073,29 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 
 		// Run
 		if err := orch.Run(ctx); err != nil {
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Migration failed: %v\n", err)}
+			return MigrationDoneMsg{Label: label, Output: fmt.Sprintf("Migration failed: %v", err)}
 		}
 
-		return MigrationDoneMsg{Output: out + "Migration completed successfully!\n"}
+		return MigrationDoneMsg{Label: label, Output: "Migration completed successfully!"}
 	}
 }
 
 func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
-		origin := "config: " + configFile
+		// Determine label for this migration
+		label := "/resume " + configFile
 		if profileName != "" {
-			origin = "profile: " + profileName
+			label = "/resume --profile " + profileName
 		}
-		out := fmt.Sprintf("Resuming migration with %s\n", origin)
 
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error loading config: %v\n", err)}
+			return MigrationDoneMsg{Label: label, Output: fmt.Sprintf("Error loading config: %v", err)}
 		}
 
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
+			return MigrationDoneMsg{Label: label, Output: fmt.Sprintf("Error initializing orchestrator: %v", err)}
 		}
 		defer orch.Close()
 		if profileName != "" {
@@ -918,10 +1110,10 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 		defer func() { activeMigrationCancel = nil }()
 
 		if err := orch.Resume(ctx); err != nil {
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Resume failed: %v\n", err)}
+			return MigrationDoneMsg{Label: label, Output: fmt.Sprintf("Resume failed: %v", err)}
 		}
 
-		return MigrationDoneMsg{Output: out + "Resume completed successfully!\n"}
+		return MigrationDoneMsg{Label: label, Output: "Resume completed successfully!"}
 	}
 }
 
@@ -931,21 +1123,20 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 		if profileName != "" {
 			origin = "profile: " + profileName
 		}
-		out := fmt.Sprintf("Validating with %s\n", origin)
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error: %v\n", err))
+			return TUIOutputMsg{Command: "/validate", Output: fmt.Sprintf("Validating with %s\nError: %v", origin, err)}
 		}
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error: %v\n", err))
+			return TUIOutputMsg{Command: "/validate", Output: fmt.Sprintf("Validating with %s\nError: %v", origin, err)}
 		}
 		defer orch.Close()
 
 		if err := orch.Validate(context.Background()); err != nil {
-			return OutputMsg(out + fmt.Sprintf("Validation failed: %v\n", err))
+			return TUIOutputMsg{Command: "/validate", Output: fmt.Sprintf("Validating with %s\nValidation failed: %v", origin, err)}
 		}
-		return OutputMsg(out + "Validation passed!\n")
+		return TUIOutputMsg{Command: "/validate", Output: fmt.Sprintf("Validating with %s\nValidation passed!", origin)}
 	}
 }
 
@@ -953,17 +1144,17 @@ func (m Model) runStatusCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
+			return TUIOutputMsg{Command: "/status", Output: fmt.Sprintf("Error: %v", err)}
 		}
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
+			return TUIOutputMsg{Command: "/status", Output: fmt.Sprintf("Error: %v", err)}
 		}
 		defer orch.Close()
 
 		// Capture stdout for ShowStatus
 		if err := orch.ShowStatus(); err != nil {
-			return OutputMsg(fmt.Sprintf("Error showing status: %v\n", err))
+			return TUIOutputMsg{Command: "/status", Output: fmt.Sprintf("Error showing status: %v", err)}
 		}
 		return nil
 	}
@@ -973,21 +1164,21 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
+			return TUIOutputMsg{Command: "/history", Output: fmt.Sprintf("Error: %v", err)}
 		}
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
+			return TUIOutputMsg{Command: "/history", Output: fmt.Sprintf("Error: %v", err)}
 		}
 		defer orch.Close()
 
 		if runID != "" {
 			if err := orch.ShowRunDetails(runID); err != nil {
-				return OutputMsg(fmt.Sprintf("Error showing run details: %v\n", err))
+				return TUIOutputMsg{Command: "/history", Output: fmt.Sprintf("Error showing run details: %v", err)}
 			}
 		} else {
 			if err := orch.ShowHistory(); err != nil {
-				return OutputMsg(fmt.Sprintf("Error showing history: %v\n", err))
+				return TUIOutputMsg{Command: "/history", Output: fmt.Sprintf("Error showing history: %v", err)}
 			}
 		}
 		return nil
@@ -996,7 +1187,7 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 
 func (m Model) handleProfileCommand(parts []string) tea.Cmd {
 	if len(parts) < 2 {
-		return func() tea.Msg { return OutputMsg("Usage: /profile save|list|delete|export\n") }
+		return func() tea.Msg { return TUIOutputMsg{Command: "/profile", Output: "Usage: /profile save|list|delete|export"} }
 	}
 
 	action := parts[1]
@@ -1006,22 +1197,22 @@ func (m Model) handleProfileCommand(parts []string) tea.Cmd {
 	case "save":
 		name, configFile := parseProfileSaveArgs(parts)
 		if name == "" {
-			return func() tea.Msg { return OutputMsg("Usage: /profile save NAME [config_file]\n") }
+			return func() tea.Msg { return TUIOutputMsg{Command: "/profile save", Output: "Usage: /profile save NAME [config_file]"} }
 		}
 		return m.profileSaveCmd(name, configFile)
 	case "delete":
 		if len(parts) < 3 {
-			return func() tea.Msg { return OutputMsg("Usage: /profile delete NAME\n") }
+			return func() tea.Msg { return TUIOutputMsg{Command: "/profile delete", Output: "Usage: /profile delete NAME"} }
 		}
 		return m.profileDeleteCmd(parts[2])
 	case "export":
 		name, outFile := parseProfileExportArgs(parts)
 		if name == "" {
-			return func() tea.Msg { return OutputMsg("Usage: /profile export NAME [output_file]\n") }
+			return func() tea.Msg { return TUIOutputMsg{Command: "/profile export", Output: "Usage: /profile export NAME [output_file]"} }
 		}
 		return m.profileExportCmd(name, outFile)
 	default:
-		return func() tea.Msg { return OutputMsg("Unknown profile command: " + action + "\n") }
+		return func() tea.Msg { return TUIOutputMsg{Command: "/profile", Output: "Unknown profile command: " + action} }
 	}
 }
 
@@ -1149,7 +1340,7 @@ func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := config.Load(configFile)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error loading config: %v\n", err))
+			return TUIOutputMsg{Command: "/profile save", Output: fmt.Sprintf("Error loading config: %v", err)}
 		}
 		if name == "" {
 			if cfg.Profile.Name != "" {
@@ -1161,26 +1352,26 @@ func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 		}
 		payload, err := yaml.Marshal(cfg)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error encoding config: %v\n", err))
+			return TUIOutputMsg{Command: "/profile save", Output: fmt.Sprintf("Error encoding config: %v", err)}
 		}
 
 		dataDir, err := config.DefaultDataDir()
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+			return TUIOutputMsg{Command: "/profile save", Output: fmt.Sprintf("Error resolving data dir: %v", err)}
 		}
 		state, err := checkpoint.New(dataDir)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+			return TUIOutputMsg{Command: "/profile save", Output: fmt.Sprintf("Error opening profile store: %v", err)}
 		}
 		defer state.Close()
 
 		if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
 			if strings.Contains(err.Error(), "MSSQL_PG_MIGRATE_MASTER_KEY is not set") {
-				return OutputMsg("Error saving profile: MSSQL_PG_MIGRATE_MASTER_KEY is not set. Start the TUI with the env var set.\n")
+				return TUIOutputMsg{Command: "/profile save", Output: "Error saving profile: MSSQL_PG_MIGRATE_MASTER_KEY is not set. Start the TUI with the env var set."}
 			}
-			return OutputMsg(fmt.Sprintf("Error saving profile: %v\n", err))
+			return TUIOutputMsg{Command: "/profile save", Output: fmt.Sprintf("Error saving profile: %v", err)}
 		}
-		return OutputMsg(fmt.Sprintf("Saved profile %q\n", name))
+		return TUIOutputMsg{Command: "/profile save", Output: fmt.Sprintf("Saved profile %q", name)}
 	}
 }
 
@@ -1188,20 +1379,20 @@ func (m Model) profileListCmd() tea.Cmd {
 	return func() tea.Msg {
 		dataDir, err := config.DefaultDataDir()
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+			return TUIOutputMsg{Command: "/profile list", Output: fmt.Sprintf("Error resolving data dir: %v", err)}
 		}
 		state, err := checkpoint.New(dataDir)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+			return TUIOutputMsg{Command: "/profile list", Output: fmt.Sprintf("Error opening profile store: %v", err)}
 		}
 		defer state.Close()
 
 		profiles, err := state.ListProfiles()
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error listing profiles: %v\n", err))
+			return TUIOutputMsg{Command: "/profile list", Output: fmt.Sprintf("Error listing profiles: %v", err)}
 		}
 		if len(profiles) == 0 {
-			return OutputMsg("No profiles found\n")
+			return TUIOutputMsg{Command: "/profile list", Output: "No profiles found"}
 		}
 
 		var b strings.Builder
@@ -1214,7 +1405,7 @@ func (m Model) profileListCmd() tea.Cmd {
 				p.CreatedAt.Format("2006-01-02 15:04:05"),
 				p.UpdatedAt.Format("2006-01-02 15:04:05"))
 		}
-		return OutputMsg(b.String())
+		return TUIOutputMsg{Command: "/profile list", Output: b.String()}
 	}
 }
 
@@ -1222,18 +1413,18 @@ func (m Model) profileDeleteCmd(name string) tea.Cmd {
 	return func() tea.Msg {
 		dataDir, err := config.DefaultDataDir()
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+			return TUIOutputMsg{Command: "/profile delete", Output: fmt.Sprintf("Error resolving data dir: %v", err)}
 		}
 		state, err := checkpoint.New(dataDir)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+			return TUIOutputMsg{Command: "/profile delete", Output: fmt.Sprintf("Error opening profile store: %v", err)}
 		}
 		defer state.Close()
 
 		if err := state.DeleteProfile(name); err != nil {
-			return OutputMsg(fmt.Sprintf("Error deleting profile: %v\n", err))
+			return TUIOutputMsg{Command: "/profile delete", Output: fmt.Sprintf("Error deleting profile: %v", err)}
 		}
-		return OutputMsg(fmt.Sprintf("Deleted profile %q\n", name))
+		return TUIOutputMsg{Command: "/profile delete", Output: fmt.Sprintf("Deleted profile %q", name)}
 	}
 }
 
@@ -1241,22 +1432,22 @@ func (m Model) profileExportCmd(name, outFile string) tea.Cmd {
 	return func() tea.Msg {
 		dataDir, err := config.DefaultDataDir()
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+			return TUIOutputMsg{Command: "/profile export", Output: fmt.Sprintf("Error resolving data dir: %v", err)}
 		}
 		state, err := checkpoint.New(dataDir)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+			return TUIOutputMsg{Command: "/profile export", Output: fmt.Sprintf("Error opening profile store: %v", err)}
 		}
 		defer state.Close()
 
 		blob, err := state.GetProfile(name)
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error loading profile: %v\n", err))
+			return TUIOutputMsg{Command: "/profile export", Output: fmt.Sprintf("Error loading profile: %v", err)}
 		}
 		if err := os.WriteFile(outFile, blob, 0600); err != nil {
-			return OutputMsg(fmt.Sprintf("Error exporting profile: %v\n", err))
+			return TUIOutputMsg{Command: "/profile export", Output: fmt.Sprintf("Error exporting profile: %v", err)}
 		}
-		return OutputMsg(fmt.Sprintf("Exported profile %q to %s\n", name, outFile))
+		return TUIOutputMsg{Command: "/profile export", Output: fmt.Sprintf("Exported profile %q to %s", name, outFile)}
 	}
 }
 
