@@ -506,9 +506,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Update viewport with log buffer + progress line
+		// Update viewport with log buffer + progress line (but not during wizard)
 		content := m.logBuffer
-		if m.progressLine != "" {
+		if m.progressLine != "" && m.mode != modeWizard {
 			content += styleSystemOutput.Render("  "+m.progressLine) + "\n"
 		}
 		m.viewport.SetContent(content)
@@ -823,6 +823,13 @@ Built with Go and Bubble Tea.`
 		return func() tea.Msg { return BoxedOutputMsg(about) }
 
 	case "/wizard":
+		// Don't allow wizard while migration is running
+		if m.migrationRunning {
+			return func() tea.Msg {
+				return OutputMsg("Cannot start wizard while a migration is running. Wait for it to complete or press Ctrl+C to cancel.\n")
+			}
+		}
+
 		m.mode = modeWizard
 		m.step = stepSourceType
 		m.textInput.Reset()
