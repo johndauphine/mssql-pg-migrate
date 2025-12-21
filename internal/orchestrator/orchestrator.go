@@ -213,7 +213,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	if o.config.Migration.TargetMode == "truncate" {
 		fmt.Println("Preparing target tables (truncate mode)...")
-		for _, t := range tables {
+		for i, t := range tables {
+			fmt.Printf("  [%d/%d] %s\n", i+1, len(tables), t.Name)
 			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 			if err != nil {
 				o.state.CompleteRun(runID, "failed", err.Error())
@@ -237,7 +238,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	} else {
 		// Default: drop_recreate
 		fmt.Println("Creating target tables (drop and recreate)...")
-		for _, t := range tables {
+		for i, t := range tables {
+			fmt.Printf("  [%d/%d] %s\n", i+1, len(tables), t.Name)
 			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 				o.state.CompleteRun(runID, "failed", err.Error())
 				o.notifyFailure(runID, err, time.Since(startTime))
