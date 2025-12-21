@@ -12,6 +12,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// expandTilde expands ~ or ~/ at the start of a path to the user's home directory
+func expandTilde(path string) string {
+	if path == "" {
+		return path
+	}
+	if path == "~" {
+		home, _ := os.UserHomeDir()
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
 // getAvailableMemoryMB returns available system memory in MB (Linux only, falls back to 4GB)
 func getAvailableMemoryMB() int64 {
 	file, err := os.Open("/proc/meminfo")
@@ -286,6 +302,8 @@ func (c *Config) applyDefaults() {
 	if c.Migration.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		c.Migration.DataDir = filepath.Join(home, ".mssql-pg-migrate")
+	} else {
+		c.Migration.DataDir = expandTilde(c.Migration.DataDir)
 	}
 	if c.Migration.TargetMode == "" {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
