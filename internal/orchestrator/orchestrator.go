@@ -38,6 +38,12 @@ const (
 	TaskValidate       TaskType = "validate"
 )
 
+// TableFailure records a table transfer failure
+type TableFailure struct {
+	TableName string
+	Error     error
+}
+
 // Orchestrator coordinates the migration process
 type Orchestrator struct {
 	config     *config.Config
@@ -262,7 +268,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Transfer data
 	logging.Info("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
-	if err := o.transferAll(ctx, runID, tables); err != nil {
+	tableFailures, err := o.transferAll(ctx, runID, tables)
+	if err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -275,18 +282,39 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		return fmt.Errorf("transferring data: %w", err)
 	}
 
-	// Finalize
+	// Log summary of table failures (individual failures already logged)
+	if len(tableFailures) > 0 {
+		logging.Warn("%d table(s) failed during transfer:", len(tableFailures))
+		for _, f := range tableFailures {
+			logging.Warn("  - %s: %v", f.TableName, f.Error)
+		}
+	}
+
+	// Filter out failed tables for finalize/validate
+	failedTableNames := make(map[string]bool)
+	for _, f := range tableFailures {
+		failedTableNames[f.TableName] = true
+	}
+	var successTables []source.Table
+	for _, t := range tables {
+		if !failedTableNames[t.Name] {
+			successTables = append(successTables, t)
+		}
+	}
+
+	// Finalize (only for successful tables)
 	logging.Info("Finalizing...")
 	o.state.UpdatePhase(runID, "finalizing")
-	if err := o.finalize(ctx, tables); err != nil {
+	if err := o.finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
 
-	// Validate
+	// Validate (only for successful tables)
 	logging.Info("Validating...")
 	o.state.UpdatePhase(runID, "validating")
+	o.tables = successTables // Update for validation
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
@@ -304,15 +332,30 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Calculate stats for notification
 	duration := time.Since(startTime)
 	var totalRows int64
-	for _, t := range tables {
+	for _, t := range successTables {
 		totalRows += t.RowCount
 	}
 	throughput := float64(totalRows) / duration.Seconds()
 
-	o.state.CompleteRun(runID, "success", "")
-	o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
-	logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
-		len(tables), totalRows, duration.Round(time.Second), throughput)
+	// Determine final status and send appropriate notification
+	if len(tableFailures) > 0 {
+		// Partial success
+		failureNames := make([]string, len(tableFailures))
+		for i, f := range tableFailures {
+			failureNames[i] = f.TableName
+		}
+		o.state.CompleteRun(runID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures)))
+		o.notifier.MigrationCompletedWithErrors(runID, startTime, duration,
+			len(successTables), len(tableFailures), totalRows, throughput, failureNames)
+		logging.Warn("Migration completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
+			len(successTables), len(tableFailures), totalRows, duration.Round(time.Second), throughput)
+	} else {
+		// Full success
+		o.state.CompleteRun(runID, "success", "")
+		o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
+		logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
+			len(tables), totalRows, duration.Round(time.Second), throughput)
+	}
 
 	return nil
 }
@@ -381,7 +424,7 @@ func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
 	return filtered
 }
 
-func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table) error {
+func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table) ([]TableFailure, error) {
 	var jobs []transfer.Job
 
 	// Create progress saver for chunk-level resume
@@ -416,7 +459,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			logging.Debug("  Partitioning %s (%d rows, %d partitions)...", t.Name, t.RowCount, numPartitions)
 			partitions, err := o.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
 			if err != nil {
-				return fmt.Errorf("partitioning %s: %w", t.FullName(), err)
+				return nil, fmt.Errorf("partitioning %s: %w", t.FullName(), err)
 			}
 
 			tableJobs[t.Name] = len(partitions)
@@ -515,7 +558,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	for _, j := range jobs {
 		if j.Partition != nil && !truncatedTables[j.Table.Name] {
 			if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, j.Table.Name); err != nil {
-				return fmt.Errorf("pre-truncating table %s: %w", j.Table.Name, err)
+				return nil, fmt.Errorf("pre-truncating table %s: %w", j.Table.Name, err)
 			}
 			truncatedTables[j.Table.Name] = true
 		}
@@ -524,12 +567,18 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Execute jobs with worker pool
 	sem := make(chan struct{}, o.config.Migration.Workers)
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(jobs))
+
+	// Track failures per table
+	type tableError struct {
+		tableName string
+		err       error
+	}
+	errCh := make(chan tableError, len(jobs))
 
 	for _, job := range jobs {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case sem <- struct{}{}:
 		}
 
@@ -551,7 +600,11 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				ts.mu.Unlock()
 				// Mark this task as failed
 				o.state.UpdateTaskStatus(j.TaskID, "failed", err.Error())
-				errCh <- fmt.Errorf("transfer %s: %w", j.Table.FullName(), err)
+				errCh <- tableError{tableName: j.Table.Name, err: err}
+				// Log the failure immediately
+				logging.Error("Table %s failed: %v", j.Table.Name, err)
+				// Notify via Slack
+				o.notifier.TableTransferFailed(runID, j.Table.Name, err)
 				return
 			}
 
@@ -578,10 +631,18 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	wg.Wait()
 	close(errCh)
 
-	// Collect errors
-	var errs []error
-	for err := range errCh {
-		errs = append(errs, err)
+	// Collect table failures (deduplicate by table name)
+	failedTables := make(map[string]error)
+	for te := range errCh {
+		// Check for context cancellation
+		if errors.Is(te.err, context.Canceled) || errors.Is(te.err, context.DeadlineExceeded) {
+			o.progress.Finish()
+			return nil, context.Canceled
+		}
+		// Only keep first error per table
+		if _, exists := failedTables[te.tableName]; !exists {
+			failedTables[te.tableName] = te.err
+		}
 	}
 
 	o.progress.Finish()
@@ -632,17 +693,13 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		}
 	}
 
-	if len(errs) > 0 {
-		// Check if any error is a context cancellation
-		for _, err := range errs {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return context.Canceled // Return unwrapped so caller can detect it
-			}
-		}
-		return fmt.Errorf("%d transfer errors: %w", len(errs), errs[0])
+	// Convert map to slice
+	var failures []TableFailure
+	for tableName, err := range failedTables {
+		failures = append(failures, TableFailure{TableName: tableName, Error: err})
 	}
 
-	return nil
+	return failures, nil
 }
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
@@ -1043,7 +1100,8 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Transfer only the incomplete tables
 	logging.Info("Transferring data...")
-	if err := o.transferAll(ctx, run.ID, tablesToTransfer); err != nil {
+	tableFailures, err := o.transferAll(ctx, run.ID, tablesToTransfer)
+	if err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1056,16 +1114,36 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		return fmt.Errorf("transferring data: %w", err)
 	}
 
-	// Finalize (uses all tables for constraints)
-	o.tables = tables
+	// Log summary of table failures (individual failures already logged)
+	if len(tableFailures) > 0 {
+		logging.Warn("%d table(s) failed during transfer:", len(tableFailures))
+		for _, f := range tableFailures {
+			logging.Warn("  - %s: %v", f.TableName, f.Error)
+		}
+	}
+
+	// Filter out failed tables for finalize/validate
+	failedTableNames := make(map[string]bool)
+	for _, f := range tableFailures {
+		failedTableNames[f.TableName] = true
+	}
+	var successTables []source.Table
+	for _, t := range tables {
+		if !failedTableNames[t.Name] {
+			successTables = append(successTables, t)
+		}
+	}
+
+	// Finalize (uses successful tables for constraints)
+	o.tables = successTables
 	logging.Info("Finalizing...")
-	if err := o.finalize(ctx, tables); err != nil {
+	if err := o.finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
 
-	// Validate all tables
+	// Validate successful tables
 	logging.Info("Validating...")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1081,17 +1159,42 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 	}
 
+	// Calculate stats - only count rows from tables we attempted to transfer that succeeded
 	duration := time.Since(startTime)
 	var totalRows int64
 	for _, t := range tablesToTransfer {
-		totalRows += t.RowCount
+		if !failedTableNames[t.Name] {
+			totalRows += t.RowCount
+		}
 	}
 	throughput := float64(totalRows) / duration.Seconds()
 
-	o.state.CompleteRun(run.ID, "success", "")
-	o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
-	logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
-		len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
+	// Determine final status and send appropriate notification
+	successCount := 0
+	for _, t := range tablesToTransfer {
+		if !failedTableNames[t.Name] {
+			successCount++
+		}
+	}
+
+	if len(tableFailures) > 0 {
+		// Partial success
+		failureNames := make([]string, len(tableFailures))
+		for i, f := range tableFailures {
+			failureNames[i] = f.TableName
+		}
+		o.state.CompleteRun(run.ID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures)))
+		o.notifier.MigrationCompletedWithErrors(run.ID, startTime, duration,
+			successCount, len(tableFailures), totalRows, throughput, failureNames)
+		logging.Warn("Resume completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
+			successCount, len(tableFailures), totalRows, duration.Round(time.Second), throughput)
+	} else {
+		// Full success
+		o.state.CompleteRun(run.ID, "success", "")
+		o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
+		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
+			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
+	}
 
 	return nil
 }

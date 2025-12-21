@@ -160,6 +160,56 @@ func (n *Notifier) MigrationFailed(runID string, err error, duration time.Durati
 	return n.send(msg)
 }
 
+// MigrationCompletedWithErrors sends notification when migration completes with some table failures
+func (n *Notifier) MigrationCompletedWithErrors(runID string, startTime time.Time, duration time.Duration,
+	successTables int, failedTables int, rowCount int64, throughput float64, failures []string) error {
+	if !n.IsEnabled() {
+		return nil
+	}
+
+	// Build failure summary
+	failureSummary := ""
+	if len(failures) > 0 {
+		if len(failures) <= 5 {
+			failureSummary = fmt.Sprintf("Failed tables: %s", failures[0])
+			for i := 1; i < len(failures); i++ {
+				failureSummary += ", " + failures[i]
+			}
+		} else {
+			failureSummary = fmt.Sprintf("Failed tables: %s, %s, %s... and %d more",
+				failures[0], failures[1], failures[2], len(failures)-3)
+		}
+	}
+
+	headerText := fmt.Sprintf("Migration completed with errors. %d tables succeeded, %d tables failed. Transferred %s rows. Throughput: %s rows/sec.",
+		successTables, failedTables, formatNumberWithCommas(rowCount), formatNumberWithCommas(int64(throughput)))
+
+	msg := SlackMessage{
+		Channel:   n.config.Channel,
+		Username:  n.getUsername(),
+		IconEmoji: ":warning:",
+		Text:      headerText,
+		Attachments: []SlackAttachment{
+			{
+				Color: "#ffc107", // yellow/orange
+				Fields: []SlackField{
+					{Title: "Run ID", Value: runID, Short: true},
+					{Title: "Started", Value: startTime.UTC().Format("2006-01-02 15:04:05 UTC"), Short: true},
+					{Title: "Duration", Value: formatDuration(duration), Short: true},
+					{Title: "Succeeded", Value: fmt.Sprintf("%d tables", successTables), Short: true},
+					{Title: "Failed", Value: fmt.Sprintf("%d tables", failedTables), Short: true},
+					{Title: "Total Rows", Value: formatNumberWithCommas(rowCount), Short: true},
+					{Title: "Failed Tables", Value: failureSummary, Short: false},
+				},
+				Footer:    "mssql-pg-migrate",
+				Timestamp: time.Now().Unix(),
+			},
+		},
+	}
+
+	return n.send(msg)
+}
+
 // TableTransferFailed sends notification for individual table failures
 func (n *Notifier) TableTransferFailed(runID, tableName string, err error) error {
 	if !n.IsEnabled() {
