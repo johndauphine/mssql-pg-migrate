@@ -62,6 +62,7 @@ type Model struct {
 	historyIdx    int
 	logBuffer     string   // Persistent buffer for logs
 	lineBuffer    string   // Buffer for incoming partial lines
+	progressLine  string   // Current progress bar line (updated in-place)
 	suggestions   []string // Auto-completion suggestions
 	suggestionIdx int      // Currently selected suggestion index
 	lastInput     string   // Last input value to prevent unnecessary suggestion regeneration
@@ -380,6 +381,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Migration completed - clear the running state
 		m.migrationRunning = false
 		activeMigrationCancel = nil
+		m.progressLine = "" // Clear any progress bar
 		// Process the output the same way as OutputMsg
 		m.lineBuffer += msg.Output
 
@@ -434,6 +436,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 
+			// Clear progress line when we get a complete line
+			m.progressLine = ""
+
 			// Extract line
 			line := m.lineBuffer[:newlineIdx]
 			m.lineBuffer = m.lineBuffer[newlineIdx+1:]
@@ -468,8 +473,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Update viewport
-		m.viewport.SetContent(m.logBuffer)
+		// Check for progress bar updates (lines with \r but no \n)
+		// These are in-place updates like progress bars
+		if strings.Contains(m.lineBuffer, "\r") {
+			// Extract the part after the last \r as the current progress line
+			if lastCR := strings.LastIndex(m.lineBuffer, "\r"); lastCR != -1 {
+				m.progressLine = strings.TrimSpace(m.lineBuffer[lastCR+1:])
+				// Keep everything before the last \r in case there's more content
+				m.lineBuffer = m.lineBuffer[:lastCR+1]
+			}
+		}
+
+		// Update viewport with log buffer + progress line
+		content := m.logBuffer
+		if m.progressLine != "" {
+			content += styleSystemOutput.Render("  "+m.progressLine) + "\n"
+		}
+		m.viewport.SetContent(content)
 		m.viewport.GotoBottom()
 
 	case TickMsg:

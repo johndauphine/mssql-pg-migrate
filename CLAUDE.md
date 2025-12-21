@@ -163,6 +163,11 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Merge to main only after testing
 - Delete branches after merging
 
+### Building
+- **Always build the binary to the repo root after making changes**
+- Command: `go build -o mssql-pg-migrate ./cmd/...`
+- This ensures the user has an up-to-date binary for testing
+
 ### Testing
 - Run `go build ./...` before committing
 - Run `golangci-lint run --timeout=5m` to check for lint errors
