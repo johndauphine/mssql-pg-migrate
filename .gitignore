@@ -24,3 +24,6 @@ Thumbs.db
 # Go
 vendor/
 /dist/
+
+# Logs
+session.log
