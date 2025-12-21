@@ -951,20 +951,24 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	// Check for chunk-level progress to avoid unnecessary truncation
 	progressSaver := checkpoint.NewProgressSaver(o.state)
 	for _, t := range tablesToTransfer {
+		taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+		taskID, _ := o.state.CreateTask(run.ID, "transfer", taskKey)
+
 		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 		if err != nil {
 			o.state.CompleteRun(run.ID, "failed")
 			return fmt.Errorf("checking table %s: %w", t.Name, err)
 		}
 		if !exists {
+			// Table doesn't exist - create it and clear any stale progress
 			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
 				o.state.CompleteRun(run.ID, "failed")
 				return fmt.Errorf("creating table %s: %w", t.Name, err)
 			}
+			// Clear any saved progress since we're starting fresh
+			o.state.ClearTransferProgress(taskID)
 		} else {
-			// Check if we have saved chunk progress for this table
-			taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-			taskID, _ := o.state.CreateTask(run.ID, "transfer", taskKey)
+			// Table exists - check if we have saved chunk progress
 			lastPK, _, _ := progressSaver.GetProgress(taskID)
 
 			if lastPK == nil {

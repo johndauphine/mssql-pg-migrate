@@ -296,6 +296,25 @@ func (fs *FileState) GetTransferProgress(taskID int64) (*TransferProgress, error
 	return nil, nil
 }
 
+// ClearTransferProgress removes saved progress for a task (for fresh re-transfer).
+func (fs *FileState) ClearTransferProgress(taskID int64) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	for key, ts := range fs.state.Tables {
+		if ts.TaskID == taskID {
+			ts.LastPK = nil
+			ts.RowsDone = 0
+			ts.RowsTotal = 0
+			ts.Status = "pending"
+			fs.state.Tables[key] = ts
+			return fs.save()
+		}
+	}
+
+	return nil
+}
+
 // GetAllRuns returns empty slice (file state doesn't track history).
 func (fs *FileState) GetAllRuns() ([]Run, error) {
 	fs.mu.RLock()

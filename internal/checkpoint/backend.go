@@ -19,6 +19,7 @@ type StateBackend interface {
 	// Progress tracking (for chunk-level resume)
 	SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
 	GetTransferProgress(taskID int64) (*TransferProgress, error)
+	ClearTransferProgress(taskID int64) error // Clear progress for fresh re-transfer
 
 	// History (optional - file backend may return empty)
 	GetAllRuns() ([]Run, error)

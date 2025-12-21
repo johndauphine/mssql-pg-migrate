@@ -464,6 +464,12 @@ func (s *State) GetTransferProgress(taskID int64) (*TransferProgress, error) {
 	return &p, err
 }
 
+// ClearTransferProgress removes saved progress for a task (for fresh re-transfer)
+func (s *State) ClearTransferProgress(taskID int64) error {
+	_, err := s.db.Exec(`DELETE FROM transfer_progress WHERE task_id = ?`, taskID)
+	return err
+}
+
 // GetRunStats returns summary stats for a run
 func (s *State) GetRunStats(runID string) (total, pending, running, success, failed int, err error) {
 	err = s.db.QueryRow(`
