@@ -1017,6 +1017,18 @@ func (o *Orchestrator) ShowStatus() error {
 		return err
 	}
 
+	if running == 0 {
+		fmt.Printf("No active migration (last incomplete run: %s)\n", run.ID)
+		if pending > 0 {
+			fmt.Printf("Status: interrupted (pending tasks)\n")
+			fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
+			fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
+				total, pending, running, success, failed)
+			fmt.Println("Run 'resume' to continue.")
+		}
+		return nil
+	}
+
 	fmt.Printf("Run: %s\n", run.ID)
 	fmt.Printf("Status: %s\n", run.Status)
 	fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))

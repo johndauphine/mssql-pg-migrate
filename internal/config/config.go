@@ -126,10 +126,22 @@ type MigrationConfig struct {
 	MSSQLRowsPerBatch      int      `yaml:"mssql_rows_per_batch"`     // MSSQL bulk copy hint (default=chunk_size)
 }
 
-// Load reads configuration from a YAML file
+// LoadOptions controls configuration loading behavior.
+type LoadOptions struct {
+	SuppressWarnings bool
+}
+
+// Load reads configuration from a YAML file.
 func Load(path string) (*Config, error) {
+	return LoadWithOptions(path, LoadOptions{})
+}
+
+// LoadWithOptions reads configuration from a YAML file with options.
+func LoadWithOptions(path string, opts LoadOptions) (*Config, error) {
 	// Check file permissions before reading (warns if insecure)
-	checkFilePermissions(path)
+	if warning := checkFilePermissions(path); warning != "" && !opts.SuppressWarnings {
+		fmt.Fprint(os.Stderr, warning)
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -330,11 +330,12 @@ func (s *State) CompleteRun(id string, status string) error {
 func (s *State) GetLastIncompleteRun() (*Run, error) {
 	var r Run
 	var startedAtStr string
+	var profileName, configPath sql.NullString
 	err := s.db.QueryRow(`
 		SELECT id, started_at, status, source_schema, target_schema, profile_name, config_path
 		FROM runs WHERE status = 'running'
 		ORDER BY started_at DESC LIMIT 1
-	`).Scan(&r.ID, &startedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &r.ProfileName, &r.ConfigPath)
+	`).Scan(&r.ID, &startedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -343,6 +344,12 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	}
 	// Parse SQLite datetime string
 	r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+	if profileName.Valid {
+		r.ProfileName = profileName.String
+	}
+	if configPath.Valid {
+		r.ConfigPath = configPath.String
+	}
 	return &r, nil
 }
 

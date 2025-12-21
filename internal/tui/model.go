@@ -79,6 +79,7 @@ type commandInfo struct {
 
 var availableCommands = []commandInfo{
 	{"/run", "Start migration (default: config.yaml)"},
+	{"/resume", "Resume an interrupted migration"},
 	{"/validate", "Validate migration row counts"},
 	{"/status", "Show migration status"},
 	{"/history", "Show migration history"},
@@ -117,7 +118,7 @@ func tickCmd() tea.Cmd {
 // InitialModel returns the initial model state
 func InitialModel() Model {
 	ti := textinput.New()
-	ti.Placeholder = "Type /help for commands..."
+	ti.Placeholder = "Type your message or @path/to/file"
 	ti.Focus()
 	ti.CharLimit = 156
 	ti.Width = 20
@@ -397,7 +398,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/validate", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -486,8 +487,9 @@ func (m Model) View() string {
 		suggestionsView = strings.Join(lines, "\n") + "\n"
 	}
 
+	viewport := styleViewport.Width(m.viewport.Width + 2).Render(m.viewport.View())
 	return fmt.Sprintf("%s\n%s\n%s%s",
-		m.viewport.View(),
+		viewport,
 		styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
 		suggestionsView,
 		m.statusBarView(),
@@ -513,9 +515,11 @@ func (m Model) statusBarView() string {
 		usedWidth = m.width
 	}
 
-	spacer := styleStatusBar.
-		Width(m.width - usedWidth).
-		Render("")
+	spacerWidth := m.width - usedWidth
+	if spacerWidth < 0 {
+		spacerWidth = 0
+	}
+	spacer := styleStatusBar.Width(spacerWidth).Render("")
 
 	return lipgloss.JoinHorizontal(lipgloss.Top,
 		dir,
@@ -547,7 +551,7 @@ func (m Model) welcomeMessage() string {
 `
 
 	tips := lipgloss.NewStyle().Foreground(colorGray).Render(`
- Tip: You can resume an interrupted migration with /run.
+ Tip: You can resume an interrupted migration with /resume.
       Hold Shift to select text with mouse.`)
 
 	return welcome + body + tips
@@ -587,6 +591,8 @@ Available Commands:
   /wizard               Launch the configuration wizard
   /run [config_file]    Start migration (default: config.yaml)
   /run --profile NAME   Start migration using a saved profile
+  /resume [config_file] Resume an interrupted migration
+  /resume --profile NAME Resume an interrupted migration using a saved profile
   /validate             Validate migration
   /status               Show migration status
   /history              Show migration history
@@ -638,7 +644,7 @@ Available Commands:
 
 		// Load existing config if available to use as defaults
 		if _, err := os.Stat(m.wizardFile); err == nil {
-			if cfg, err := config.Load(m.wizardFile); err == nil {
+			if cfg, err := config.LoadWithOptions(m.wizardFile, config.LoadOptions{SuppressWarnings: true}); err == nil {
 				m.wizardData = *cfg
 				m.logBuffer += fmt.Sprintf("\n--- EDITING CONFIGURATION: %s ---\n", m.wizardFile)
 			} else {
@@ -658,6 +664,9 @@ Available Commands:
 	case "/run":
 		configFile, profileName := parseConfigArgs(parts)
 		return m.runMigrationCmd(configFile, profileName)
+	case "/resume":
+		configFile, profileName := parseConfigArgs(parts)
+		return m.runResumeCmd(configFile, profileName)
 
 	case "/validate":
 		configFile, profileName := parseConfigArgs(parts)
@@ -714,6 +723,38 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 		}
 
 		return OutputMsg(out + "Migration completed successfully!\n")
+	}
+}
+
+func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
+	return func() tea.Msg {
+		origin := "config: " + configFile
+		if profileName != "" {
+			origin = "profile: " + profileName
+		}
+		out := fmt.Sprintf("Resuming migration with %s\n", origin)
+
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
+		if err != nil {
+			return OutputMsg(out + fmt.Sprintf("Error loading config: %v\n", err))
+		}
+
+		orch, err := orchestrator.New(cfg)
+		if err != nil {
+			return OutputMsg(out + fmt.Sprintf("Error initializing orchestrator: %v\n", err))
+		}
+		defer orch.Close()
+		if profileName != "" {
+			orch.SetRunContext(profileName, "")
+		} else {
+			orch.SetRunContext("", configFile)
+		}
+
+		if err := orch.Resume(context.Background()); err != nil {
+			return OutputMsg(out + fmt.Sprintf("Resume failed: %v\n", err))
+		}
+
+		return OutputMsg(out + "Resume completed successfully!\n")
 	}
 }
 

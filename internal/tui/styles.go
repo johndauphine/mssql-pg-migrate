@@ -4,43 +4,46 @@ import "github.com/charmbracelet/lipgloss"
 
 var (
 	// Colors
-	colorPurple    = lipgloss.Color("#7D56F4")
-	colorDarkPurple = lipgloss.Color("#5a3eaf")
-	colorGreen     = lipgloss.Color("#04B575")
-	colorRed       = lipgloss.Color("#FF4141")
-	colorGray      = lipgloss.Color("#626262")
-	colorLightGray = lipgloss.Color("#9e9e9e")
-	colorWhite     = lipgloss.Color("#FFFFFF")
-	colorBlue      = lipgloss.Color("#007BFF")
+	colorBackground = lipgloss.Color("")
+	colorSurface    = lipgloss.Color("")
+	colorPurple     = lipgloss.Color("#B08CFF")
+	colorTeal       = lipgloss.Color("#8FE3FF")
+	colorGold       = lipgloss.Color("#E9C07A")
+	colorGreen      = lipgloss.Color("#39D98A")
+	colorRed        = lipgloss.Color("#FF6B6B")
+	colorGray       = lipgloss.Color("#5D6581")
+	colorLightGray  = lipgloss.Color("#A8B0C9")
+	colorWhite      = lipgloss.Color("#E6E9F5")
 
 	// Base Styles
-	styleNormal = lipgloss.NewStyle().Foreground(colorWhite)
+	styleNormal = lipgloss.NewStyle().
+			Foreground(colorWhite)
 
 	// Status Bar Styles
 	styleStatusBar = lipgloss.NewStyle().
 			Height(1).
-			Foreground(colorWhite)
+			Foreground(colorLightGray)
 
 	styleStatusDir = lipgloss.NewStyle().
-			Foreground(colorWhite).
-			Background(colorBlue).
+			Foreground(colorBackground).
+			Background(colorTeal).
 			Padding(0, 1).
 			Bold(true)
 
 	styleStatusBranch = lipgloss.NewStyle().
-			Foreground(colorWhite).
-			Background(colorPurple).
-			Padding(0, 1)
+				Foreground(colorWhite).
+				Background(colorPurple).
+				Padding(0, 1)
 
 	styleStatusClean = lipgloss.NewStyle().
-			Foreground(colorWhite).
-			Background(colorGreen).
-			Padding(0, 1)
+				Foreground(colorBackground).
+				Background(colorGreen).
+				Padding(0, 1)
 
 	styleStatusDirty = lipgloss.NewStyle().
-			Foreground(colorWhite).
-			Background(colorRed).
-			Padding(0, 1)
+				Foreground(colorBackground).
+				Background(colorRed).
+				Padding(0, 1)
 
 	styleStatusText = lipgloss.NewStyle().
 			Foreground(colorWhite).
@@ -49,15 +52,14 @@ var (
 
 	// Viewport Styles
 	styleViewport = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorPurple).
+			Foreground(colorWhite).
 			Padding(0, 1)
-	
+
 	styleTitle = lipgloss.NewStyle().
 			Foreground(colorPurple).
 			Bold(true).
 			MarginBottom(1)
-	
+
 	stylePrompt = lipgloss.NewStyle().
 			Foreground(colorPurple).
 			Bold(true)
@@ -69,19 +71,19 @@ var (
 	styleSuccess = lipgloss.NewStyle().
 			Foreground(colorGreen).
 			Bold(true)
-			
+
 	styleUserInput = lipgloss.NewStyle().
-			Foreground(colorBlue).
+			Foreground(colorPurple).
 			Bold(true)
-			
+
 	styleSystemOutput = lipgloss.NewStyle().
-			Foreground(colorLightGray)
+				Foreground(colorLightGray)
 
 	styleInputContainer = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorPurple).
-			Padding(0, 1).
-			MarginRight(1)
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorGold).
+				Foreground(colorWhite).
+				Padding(0, 1)
 
 	styleScrollbar = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), false, false, false, true). // Left border only
@@ -89,5 +91,5 @@ var (
 			Foreground(colorGray)
 
 	styleScrollbarHandle = lipgloss.NewStyle().
-			Foreground(colorPurple)
+				Foreground(colorPurple)
 )

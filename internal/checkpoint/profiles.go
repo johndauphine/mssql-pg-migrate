@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -79,8 +80,12 @@ func (s *State) ListProfiles() ([]ProfileInfo, error) {
 	for rows.Next() {
 		var p ProfileInfo
 		var createdAtStr, updatedAtStr string
-		if err := rows.Scan(&p.Name, &p.Description, &createdAtStr, &updatedAtStr); err != nil {
+		var desc sql.NullString
+		if err := rows.Scan(&p.Name, &desc, &createdAtStr, &updatedAtStr); err != nil {
 			return nil, err
+		}
+		if desc.Valid {
+			p.Description = desc.String
 		}
 		p.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
 		p.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAtStr)

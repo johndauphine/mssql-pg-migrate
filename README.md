@@ -17,6 +17,7 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 
 ### Features
 *   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/wizard`, `/status`).
+*   **Resume**: Use `/resume` to continue interrupted migrations.
 *   **Auto-Completion**:
     *   **Commands**: Tab-complete commands like `/validate` or `/history`.
     *   **Files**: Type `@` to browse and select configuration files from your current directory (e.g., `/run @conf<TAB>`).
@@ -72,6 +73,7 @@ profile:
 ```
 
 If `profile.name` is present, `profile save` can infer the name when `--name` is omitted.
+Descriptions are shown in `profile list`.
 
 **TUI workflow**
 ```
