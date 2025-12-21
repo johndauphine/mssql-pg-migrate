@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -707,6 +708,12 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 
 	cmd := parts[0]
 
+	// Handle shell commands (starting with !)
+	if strings.HasPrefix(cmd, "!") {
+		shellCmd := strings.TrimPrefix(cmdStr, "!")
+		return m.runShellCmd(shellCmd)
+	}
+
 	// Helper to extract config file from args, supporting @/path/to/file syntax
 	getConfigFile := func(args []string) string {
 		if len(args) > 1 {
@@ -746,7 +753,8 @@ Available Commands:
   /logs                 Save session logs to a file for analysis
   /clear                Clear screen
   /quit                 Exit application
-  
+  !<command>            Run a shell command (e.g., !ls, !cat config.yaml)
+
   Note: You can use @/path/to/file for config files.
 `
 		return func() tea.Msg { return OutputMsg(help) }
@@ -985,6 +993,17 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 			}
 		}
 		return OutputMsg(output)
+	}
+}
+
+func (m Model) runShellCmd(shellCmd string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("sh", "-c", shellCmd)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("%s\nError: %v\n", string(output), err))
+		}
+		return OutputMsg(string(output))
 	}
 }
 
