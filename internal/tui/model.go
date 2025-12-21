@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -126,6 +127,68 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
 		return TickMsg(t)
 	})
+}
+
+// wrapLine wraps a line of text to fit within the specified width.
+// It preserves word boundaries when possible.
+func wrapLine(line string, width int) string {
+	if width <= 0 || len(line) <= width {
+		return line
+	}
+
+	var result strings.Builder
+	currentLine := ""
+
+	words := splitIntoWords(line)
+	for _, word := range words {
+		// If adding this word would exceed width
+		if len(currentLine)+len(word) > width {
+			if currentLine != "" {
+				result.WriteString(currentLine)
+				result.WriteString("\n")
+				currentLine = ""
+			}
+			// If the word itself is longer than width, split it
+			for len(word) > width {
+				result.WriteString(word[:width])
+				result.WriteString("\n")
+				word = word[width:]
+			}
+			currentLine = word
+		} else {
+			currentLine += word
+		}
+	}
+
+	if currentLine != "" {
+		result.WriteString(currentLine)
+	}
+
+	return result.String()
+}
+
+// splitIntoWords splits text into words while preserving whitespace.
+func splitIntoWords(s string) []string {
+	var words []string
+	var current strings.Builder
+
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			if current.Len() > 0 {
+				words = append(words, current.String())
+				current.Reset()
+			}
+			words = append(words, string(r))
+		} else {
+			current.WriteRune(r)
+		}
+	}
+
+	if current.Len() > 0 {
+		words = append(words, current.String())
+	}
+
+	return words
 }
 
 // InitialModel returns the initial model state
@@ -294,10 +357,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case WizardFinishedMsg:
 		m.mode = modeNormal
 
+		// Calculate wrap width (viewport width minus prefix and margins)
+		wrapWidth := m.viewport.Width - 4
+		if wrapWidth < 20 {
+			wrapWidth = 80 // Fallback for uninitialized viewport
+		}
+
 		text := msg.Message
 		if msg.Err != nil {
-			text = styleError.Render("✖ " + msg.Err.Error())
+			text = wrapLine(msg.Err.Error(), wrapWidth)
+			text = styleError.Render("✖ " + text)
 		} else {
+			text = wrapLine(text, wrapWidth)
 			text = styleSuccess.Render("✔ " + text)
 		}
 
@@ -311,6 +382,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		activeMigrationCancel = nil
 		// Process the output the same way as OutputMsg
 		m.lineBuffer += msg.Output
+
+		// Calculate wrap width (viewport width minus prefix and margins)
+		wrapWidth := m.viewport.Width - 4
+		if wrapWidth < 20 {
+			wrapWidth = 80 // Fallback for uninitialized viewport
+		}
+
 		for {
 			newlineIdx := strings.Index(m.lineBuffer, "\n")
 			if newlineIdx == -1 {
@@ -321,22 +399,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if line == "" {
 				continue
 			}
-			// Style the line based on content
-			var styledLine string
-			if strings.Contains(line, "Error") || strings.Contains(line, "failed") || strings.Contains(line, "obsolete") {
-				styledLine = styleError.Render("✖ " + line)
-			} else if strings.Contains(line, "success") || strings.Contains(line, "completed") {
-				styledLine = styleSuccess.Render("✔ " + line)
-			} else {
-				styledLine = styleSystemOutput.Render("  " + line)
+
+			// Wrap long lines before styling
+			wrappedLines := strings.Split(wrapLine(line, wrapWidth), "\n")
+			for _, wrappedLine := range wrappedLines {
+				// Style the line based on content
+				var styledLine string
+				if strings.Contains(line, "Error") || strings.Contains(line, "failed") || strings.Contains(line, "obsolete") {
+					styledLine = styleError.Render("✖ " + wrappedLine)
+				} else if strings.Contains(line, "success") || strings.Contains(line, "completed") {
+					styledLine = styleSuccess.Render("✔ " + wrappedLine)
+				} else {
+					styledLine = styleSystemOutput.Render("  " + wrappedLine)
+				}
+				m.logBuffer += styledLine + "\n"
 			}
-			m.logBuffer += styledLine + "\n"
 		}
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
 
 	case OutputMsg:
 		m.lineBuffer += string(msg)
+
+		// Calculate wrap width (viewport width minus prefix and margins)
+		wrapWidth := m.viewport.Width - 4
+		if wrapWidth < 20 {
+			wrapWidth = 80 // Fallback for uninitialized viewport
+		}
 
 		// Process complete lines
 		for {
@@ -354,25 +443,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				line = line[lastCR+1:]
 			}
 
-			// Apply styling
-			lowerText := strings.ToLower(line)
-			prefix := "  "
+			// Wrap long lines before styling
+			wrappedLines := strings.Split(wrapLine(line, wrapWidth), "\n")
+			for _, wrappedLine := range wrappedLines {
+				// Apply styling
+				lowerText := strings.ToLower(line)
+				prefix := "  "
 
-			isError := strings.Contains(lowerText, "error") ||
-				(strings.Contains(lowerText, "fail") && !strings.Contains(lowerText, "0 failed"))
+				isError := strings.Contains(lowerText, "error") ||
+					(strings.Contains(lowerText, "fail") && !strings.Contains(lowerText, "0 failed"))
 
-			if isError {
-				line = styleError.Render(line)
-				prefix = styleError.Render("✖ ")
-			} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "passed") || strings.Contains(lowerText, "complete") {
-				line = styleSuccess.Render(line)
-				prefix = styleSuccess.Render("✔ ")
-			} else {
-				line = styleSystemOutput.Render(line)
+				if isError {
+					wrappedLine = styleError.Render(wrappedLine)
+					prefix = styleError.Render("✖ ")
+				} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "passed") || strings.Contains(lowerText, "complete") {
+					wrappedLine = styleSuccess.Render(wrappedLine)
+					prefix = styleSuccess.Render("✔ ")
+				} else {
+					wrappedLine = styleSystemOutput.Render(wrappedLine)
+				}
+
+				// Append to log
+				m.logBuffer += prefix + wrappedLine + "\n"
 			}
-
-			// Append to log
-			m.logBuffer += prefix + line + "\n"
 		}
 
 		// Update viewport
