@@ -90,6 +90,64 @@ Descriptions are shown in `profile list`.
 - You can relocate the SQLite DB by setting `migration.data_dir` in your config (e.g., to a shared volume).
 - On first run, the default data directory (`~/.mssql-pg-migrate`) is created automatically if it does not exist.
 
+## State File Backend (Airflow/Kubernetes)
+
+For headless environments like Airflow or Kubernetes where SQLite may be impractical, you can use a YAML-based state file instead.
+
+```bash
+# Use a YAML state file instead of SQLite
+./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml run
+
+# Resume using the same state file
+./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml resume
+
+# Check status
+./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml status
+
+# View history
+./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml history
+```
+
+**State file features:**
+- **Portable** - Single YAML file, easy to store in cloud storage or shared volumes
+- **Human-readable** - Inspect and debug migration state directly
+- **Chunk-level resume** - Same resume granularity as SQLite backend
+- **Error tracking** - Failed runs store the error message for debugging
+
+**Example state file:**
+```yaml
+run_id: a1b2c3d4
+started_at: 2025-01-15T10:30:00Z
+completed_at: 2025-01-15T10:45:00Z
+status: success
+source_schema: dbo
+target_schema: public
+config_hash: 2bd314ff9b5251d5
+config_path: /path/to/config.yaml
+tables:
+  transfer:dbo.Users:
+    status: success
+    last_pk: 2465713
+    rows_done: 2465713
+    rows_total: 2465713
+    task_id: 1001
+  transfer:dbo.Posts:
+    status: success
+    last_pk: 17142169
+    rows_done: 17142169
+    rows_total: 17142169
+    task_id: 1002
+```
+
+**When to use state file vs SQLite:**
+
+| Feature | SQLite (default) | State File (`--state-file`) |
+|---------|------------------|----------------------------|
+| History | Full run history | Current run only |
+| Profiles | Encrypted storage | Not supported |
+| Best for | Desktop, TUI | Airflow, Kubernetes, CI/CD |
+| Persistence | Local database | Any storage (S3, NFS, etc.) |
+
 ## Performance
 
 - **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)
@@ -699,6 +757,25 @@ slack:
 
 # View migration history
 ./mssql-pg-migrate -c config.yaml history
+
+# View details for a specific run (shows error if failed)
+./mssql-pg-migrate -c config.yaml history --run <run-id>
+```
+
+### Headless Mode (Airflow/Kubernetes)
+
+For headless environments, use `--state-file` to store state in a YAML file instead of SQLite:
+
+```bash
+# Run with state file
+./mssql-pg-migrate -c config.yaml --state-file state.yaml run
+
+# Resume with state file
+./mssql-pg-migrate -c config.yaml --state-file state.yaml resume
+
+# All commands support --state-file
+./mssql-pg-migrate -c config.yaml --state-file state.yaml status
+./mssql-pg-migrate -c config.yaml --state-file state.yaml history
 ```
 
 ### Example Output
@@ -746,7 +823,7 @@ Votes                          OK 52928720 rows
 
 ## Resume Capability
 
-The tool saves progress to SQLite (`~/.mssql-pg-migrate/migrate.db`), enabling efficient resume after failures:
+The tool saves progress to enable efficient resume after failures. By default, state is stored in SQLite (`~/.mssql-pg-migrate/migrate.db`). For headless environments, use `--state-file` for a portable YAML state file.
 
 ### Table-level resume
 - Completed tables are skipped entirely on resume
@@ -757,9 +834,17 @@ The tool saves progress to SQLite (`~/.mssql-pg-migrate/migrate.db`), enabling e
 - On resume, continues from the exact last successful chunk
 - Partial data from interrupted chunks is cleaned up automatically
 
+### Stale progress detection
+- If target table has fewer rows than saved progress, the tool detects data loss
+- Automatically clears stale progress and restarts the table transfer
+- Prevents resuming with incorrect last_pk values
+
 ```bash
 # Resume shows what's being skipped/continued
 ./mssql-pg-migrate -c config.yaml resume
+
+# Or with state file for Airflow/Kubernetes
+./mssql-pg-migrate -c config.yaml --state-file state.yaml resume
 
 # Output:
 # Resuming run: a1b2c3d4 (started 2025-01-15T10:30:00Z)
