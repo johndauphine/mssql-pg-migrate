@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
@@ -300,10 +301,10 @@ func Execute(
 		var err error
 		resumeLastPK, resumeRowsDone, err = job.Saver.GetProgress(job.TaskID)
 		if err != nil {
-			fmt.Printf("Warning: loading progress for %s: %v\n", job.Table.Name, err)
+			logging.Warn("Failed to load checkpoint for %s: %v", job.Table.Name, err)
 		}
 		if resumeLastPK != nil {
-			fmt.Printf("Resuming %s from chunk (lastPK=%v, rows=%d)\n", job.Table.Name, resumeLastPK, resumeRowsDone)
+			logging.Info("Resuming %s at row %d (checkpoint: %v)", job.Table.Name, resumeRowsDone, resumeLastPK)
 		}
 	}
 
@@ -318,7 +319,7 @@ func Execute(
 			// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
 			if job.Table.SupportsKeysetPagination() {
 				if err := cleanupPartitionDataGeneric(ctx, tgtPool, cfg.Target.Schema, &job); err != nil {
-					fmt.Printf("Warning: cleanup partition data for %s: %v\n", job.Table.Name, err)
+					logging.Warn("Partition cleanup failed for %s: %v", job.Table.Name, err)
 				}
 			}
 		}
@@ -326,7 +327,7 @@ func Execute(
 		// Chunk-level resume: delete any rows beyond the saved lastPK
 		// This handles partial data written after the last saved checkpoint
 		if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK); err != nil {
-			fmt.Printf("Warning: cleaning up partial data for %s: %v\n", job.Table.Name, err)
+			logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
 		}
 	}
 
@@ -408,7 +409,7 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 			return err
 		}
 		if result.RowsAffected() > 0 {
-			fmt.Printf("Cleaned up %d partial rows from %s (pk > %v)\n", result.RowsAffected(), tableName, lastPK)
+			logging.Debug("Removed %d stale rows from %s beyond pk=%v", result.RowsAffected(), tableName, lastPK)
 		}
 		return nil
 	case *target.MSSQLPool:
@@ -421,7 +422,7 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 		}
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected > 0 {
-			fmt.Printf("Cleaned up %d partial rows from %s (pk > %v)\n", rowsAffected, tableName, lastPK)
+			logging.Debug("Removed %d stale rows from %s beyond pk=%v", rowsAffected, tableName, lastPK)
 		}
 		return nil
 	default:
@@ -660,7 +661,7 @@ func executeKeysetPagination(
 		// Log overlap stats periodically
 		if chunkCount > 0 && chunkCount%50 == 0 {
 			waitTime := time.Since(receiveTime)
-			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d writers=%d\n",
+			logging.Debug("Pipeline %s: %d chunks, overlap=%v, wait=%v, buffers=%d, writers=%d",
 				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters)
 		}
 
@@ -688,7 +689,7 @@ func executeKeysetPagination(
 			partID = &job.Partition.PartitionID
 		}
 		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, lastPK, totalTransferred, job.Table.RowCount); err != nil {
-			fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
+			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}
 
@@ -915,7 +916,7 @@ func executeRowNumberPagination(
 		// Log overlap stats periodically
 		if chunkCount > 0 && chunkCount%50 == 0 {
 			waitTime := time.Since(receiveTime)
-			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d writers=%d\n",
+			logging.Debug("Pipeline %s: %d chunks, overlap=%v, wait=%v, buffers=%d, writers=%d",
 				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters)
 		}
 

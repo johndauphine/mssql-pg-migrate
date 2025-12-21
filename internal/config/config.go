@@ -494,3 +494,13 @@ func (c *Config) Sanitized() *Config {
 
 	return &sanitized
 }
+
+// SanitizedYAML returns the config as YAML with sensitive fields redacted
+func (c *Config) SanitizedYAML() string {
+	sanitized := c.Sanitized()
+	data, err := yaml.Marshal(sanitized)
+	if err != nil {
+		return fmt.Sprintf("error marshaling config: %v", err)
+	}
+	return string(data)
+}

@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/schollz/progressbar/v3"
 )
 
@@ -118,6 +119,6 @@ func (t *Tracker) Finish() {
 	rowsPerSec := float64(t.current.Load()) / elapsed.Seconds()
 
 	fmt.Println()
-	fmt.Printf("Transferred %d rows in %s (%.0f rows/sec)\n",
+	logging.Info("Transfer complete: %d rows in %s (%.0f rows/sec)",
 		t.current.Load(), elapsed.Round(time.Second), rowsPerSec)
 }

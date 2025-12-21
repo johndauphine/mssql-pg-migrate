@@ -1,0 +1,157 @@
+package logging
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Level represents logging verbosity level
+type Level int
+
+const (
+	// LevelError only logs errors
+	LevelError Level = iota
+	// LevelWarn logs warnings and errors
+	LevelWarn
+	// LevelInfo logs info, warnings, and errors (default)
+	LevelInfo
+	// LevelDebug logs everything including debug messages
+	LevelDebug
+)
+
+// Logger provides leveled logging
+type Logger struct {
+	mu     sync.Mutex
+	level  Level
+	output io.Writer
+}
+
+var (
+	defaultLogger = &Logger{
+		level:  LevelInfo,
+		output: os.Stdout,
+	}
+)
+
+// ParseLevel converts a string to a Level
+func ParseLevel(s string) (Level, error) {
+	switch strings.ToLower(s) {
+	case "error":
+		return LevelError, nil
+	case "warn", "warning":
+		return LevelWarn, nil
+	case "info":
+		return LevelInfo, nil
+	case "debug":
+		return LevelDebug, nil
+	default:
+		return LevelInfo, fmt.Errorf("unknown verbosity level: %s (valid: debug, info, warn, error)", s)
+	}
+}
+
+// String returns the string representation of a level
+func (l Level) String() string {
+	switch l {
+	case LevelError:
+		return "ERROR"
+	case LevelWarn:
+		return "WARN"
+	case LevelInfo:
+		return "INFO"
+	case LevelDebug:
+		return "DEBUG"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// SetLevel sets the global log level
+func SetLevel(level Level) {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	defaultLogger.level = level
+}
+
+// SetOutput sets the output destination for logging
+func SetOutput(w io.Writer) {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	defaultLogger.output = w
+}
+
+// GetLevel returns the current log level
+func GetLevel() Level {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	return defaultLogger.level
+}
+
+// Debug logs a debug message
+func Debug(format string, args ...interface{}) {
+	defaultLogger.log(LevelDebug, format, args...)
+}
+
+// Info logs an info message
+func Info(format string, args ...interface{}) {
+	defaultLogger.log(LevelInfo, format, args...)
+}
+
+// Warn logs a warning message
+func Warn(format string, args ...interface{}) {
+	defaultLogger.log(LevelWarn, format, args...)
+}
+
+// Error logs an error message
+func Error(format string, args ...interface{}) {
+	defaultLogger.log(LevelError, format, args...)
+}
+
+// Print always prints regardless of level (for progress bars, summaries)
+func Print(format string, args ...interface{}) {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	fmt.Fprintf(defaultLogger.output, format, args...)
+}
+
+// Println always prints with newline regardless of level
+func Println(args ...interface{}) {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	fmt.Fprintln(defaultLogger.output, args...)
+}
+
+func (l *Logger) log(level Level, format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if level > l.level {
+		return
+	}
+
+	msg := fmt.Sprintf(format, args...)
+	if strings.HasPrefix(msg, "\n") {
+		// Handle leading newlines (preserve blank line formatting)
+		msg = strings.TrimPrefix(msg, "\n")
+		fmt.Fprint(l.output, "\n")
+	}
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	if !strings.HasSuffix(msg, "\n") {
+		msg += "\n"
+	}
+	fmt.Fprintf(l.output, "%s [%s] %s", timestamp, level.String(), msg)
+}
+
+// IsDebug returns true if debug level is enabled
+func IsDebug() bool {
+	return GetLevel() >= LevelDebug
+}
+
+// IsInfo returns true if info level is enabled
+func IsInfo() bool {
+	return GetLevel() >= LevelInfo
+}

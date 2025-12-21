@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/notify"
 	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
@@ -137,17 +138,22 @@ func (o *Orchestrator) SetRunContext(profileName, configPath string) {
 func (o *Orchestrator) Run(ctx context.Context) error {
 	runID := uuid.New().String()[:8]
 	startTime := time.Now()
-	fmt.Printf("Starting migration run: %s\n", runID)
-	fmt.Printf("Migration: %s -> %s\n", o.sourcePool.DBType(), o.targetPool.DBType())
-	fmt.Printf("Connection pools: source=%d, target=%d\n",
+	logging.Info("Starting migration run: %s", runID)
+	logging.Info("Migration: %s -> %s", o.sourcePool.DBType(), o.targetPool.DBType())
+	logging.Debug("Connection pools: source=%d, target=%d",
 		o.sourcePool.MaxConns(), o.targetPool.MaxConns())
+
+	// Log configuration in debug mode
+	if logging.IsDebug() {
+		logging.Debug("Configuration:\n%s", o.config.SanitizedYAML())
+	}
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("creating run: %w", err)
 	}
 
 	// Extract schema
-	fmt.Println("Extracting schema...")
+	logging.Info("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -161,19 +167,19 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 		if o.config.Migration.CreateIndexes {
 			if err := o.sourcePool.LoadIndexes(ctx, t); err != nil {
-				fmt.Printf("Warning: loading indexes for %s: %v\n", t.Name, err)
+				logging.Warn("Warning: loading indexes for %s: %v", t.Name, err)
 			}
 		}
 
 		if o.config.Migration.CreateForeignKeys {
 			if err := o.sourcePool.LoadForeignKeys(ctx, t); err != nil {
-				fmt.Printf("Warning: loading FKs for %s: %v\n", t.Name, err)
+				logging.Warn("Warning: loading FKs for %s: %v", t.Name, err)
 			}
 		}
 
 		if o.config.Migration.CreateCheckConstraints {
 			if err := o.sourcePool.LoadCheckConstraints(ctx, t); err != nil {
-				fmt.Printf("Warning: loading check constraints for %s: %v\n", t.Name, err)
+				logging.Warn("Warning: loading check constraints for %s: %v", t.Name, err)
 			}
 		}
 	}
@@ -186,7 +192,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	o.tables = tables
-	fmt.Printf("Found %d tables\n", len(tables))
+	logging.Info("Found %d tables", len(tables))
 
 	// Print pagination strategy summary
 	keysetCount := 0
@@ -198,7 +204,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			rowNumberCount++
 		}
 	}
-	fmt.Printf("Pagination: %d keyset, %d ROW_NUMBER, %d no PK\n",
+	logging.Debug("Pagination: %d keyset, %d ROW_NUMBER, %d no PK",
 		keysetCount, rowNumberCount, len(tables)-keysetCount-rowNumberCount)
 
 	// Send start notification
@@ -212,9 +218,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	if o.config.Migration.TargetMode == "truncate" {
-		fmt.Println("Preparing target tables (truncate mode)...")
+		logging.Info("Preparing target tables (truncate mode)...")
 		for i, t := range tables {
-			fmt.Printf("  [%d/%d] %s\n", i+1, len(tables), t.Name)
+			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
 			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 			if err != nil {
 				o.state.CompleteRun(runID, "failed", err.Error())
@@ -237,9 +243,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		}
 	} else {
 		// Default: drop_recreate
-		fmt.Println("Creating target tables (drop and recreate)...")
+		logging.Info("Creating target tables (drop and recreate)...")
 		for i, t := range tables {
-			fmt.Printf("  [%d/%d] %s\n", i+1, len(tables), t.Name)
+			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
 			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 				o.state.CompleteRun(runID, "failed", err.Error())
 				o.notifyFailure(runID, err, time.Since(startTime))
@@ -254,14 +260,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Transfer data
-	fmt.Println("Transferring data...")
+	logging.Info("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
 	if err := o.transferAll(ctx, runID, tables); err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			o.state.MarkRunAsResumed(runID) // Reset running tasks to pending
-			fmt.Println("Migration interrupted - run 'resume' to continue")
+			logging.Info("Migration interrupted - run 'resume' to continue")
 			return fmt.Errorf("transferring data: %w", err)
 		}
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -270,7 +276,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Finalize
-	fmt.Println("Finalizing...")
+	logging.Info("Finalizing...")
 	o.state.UpdatePhase(runID, "finalizing")
 	if err := o.finalize(ctx, tables); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -279,7 +285,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Validate
-	fmt.Println("Validating...")
+	logging.Info("Validating...")
 	o.state.UpdatePhase(runID, "validating")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -289,9 +295,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Sample validation if enabled
 	if o.config.Migration.SampleValidation {
-		fmt.Println("Running sample validation...")
+		logging.Info("Running sample validation...")
 		if err := o.validateSamples(ctx); err != nil {
-			fmt.Printf("Warning: sample validation failed: %v\n", err)
+			logging.Warn("Warning: sample validation failed: %v", err)
 		}
 	}
 
@@ -305,7 +311,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	o.state.CompleteRun(runID, "success", "")
 	o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
-	fmt.Println("Migration complete!")
+	logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
+		len(tables), totalRows, duration.Round(time.Second), throughput)
 
 	return nil
 }
@@ -368,7 +375,7 @@ func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
 	}
 
 	if len(skipped) > 0 {
-		fmt.Printf("Skipped %d tables by filter: %v\n", len(skipped), skipped)
+		logging.Debug("Skipped %d tables by filter: %v", len(skipped), skipped)
 	}
 
 	return filtered
@@ -395,7 +402,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		}
 	}
 	if largeKeysetTables > 0 || largeRowNumTables > 0 {
-		fmt.Printf("Calculating partitions for %d large tables...\n", largeKeysetTables+largeRowNumTables)
+		logging.Debug("Calculating partitions for %d large tables...", largeKeysetTables+largeRowNumTables)
 	}
 
 	for _, t := range tables {
@@ -406,7 +413,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				o.config.Migration.MaxPartitions,
 			)
 
-			fmt.Printf("  Partitioning %s (%d rows, %d partitions)...\n", t.Name, t.RowCount, numPartitions)
+			logging.Debug("  Partitioning %s (%d rows, %d partitions)...", t.Name, t.RowCount, numPartitions)
 			partitions, err := o.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
 			if err != nil {
 				return fmt.Errorf("partitioning %s: %w", t.FullName(), err)
@@ -435,7 +442,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				numPartitions = 1
 			}
 
-			fmt.Printf("  Partitioning %s (%d rows, %d partitions, row-number)...\n", t.Name, t.RowCount, numPartitions)
+			logging.Debug("  Partitioning %s (%d rows, %d partitions, row-number)...", t.Name, t.RowCount, numPartitions)
 			rowsPerPartition := t.RowCount / int64(numPartitions)
 			tableJobs[t.Name] = numPartitions
 
@@ -579,48 +586,50 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	o.progress.Finish()
 
-	// Print pool stats (based on pool type)
-	fmt.Printf("\nConnection Pool Usage:\n")
-	switch p := o.sourcePool.(type) {
-	case *source.Pool:
-		stats := p.Stats()
-		fmt.Printf("  Source (mssql): %d/%d active, %d idle, %d waits (%.1fms avg)\n",
-			stats.InUse, stats.MaxOpenConnections, stats.Idle,
-			stats.WaitCount, float64(stats.WaitDuration)/float64(max(stats.WaitCount, 1)))
-	case *source.PostgresPool:
-		fmt.Printf("  Source (postgres): max connections=%d\n", p.MaxConns())
-	}
-	switch p := o.targetPool.(type) {
-	case *target.Pool:
-		stats := p.Stats()
-		fmt.Printf("  Target (postgres): %d/%d active, %d idle, %d acquires (%d waited)\n",
-			stats.AcquiredConns, stats.MaxConns, stats.IdleConns,
-			stats.AcquireCount, stats.EmptyAcquireCount)
-	case *target.MSSQLPool:
-		fmt.Printf("  Target (mssql): max connections=%d\n", p.MaxConns())
-	}
-
-	// Print profiling stats
-	fmt.Println("\nTransfer Profile (per table):")
-	fmt.Println("------------------------------")
-	var totalQuery, totalScan, totalWrite time.Duration
-	for _, t := range tables {
-		ts := statsMap[t.Name]
-		if ts.stats.Rows > 0 {
-			fmt.Printf("%-25s %s\n", t.Name, ts.stats.String())
-			totalQuery += ts.stats.QueryTime
-			totalScan += ts.stats.ScanTime
-			totalWrite += ts.stats.WriteTime
+	// Print pool stats (based on pool type) - debug level
+	if logging.IsDebug() {
+		logging.Debug("\nConnection Pool Usage:")
+		switch p := o.sourcePool.(type) {
+		case *source.Pool:
+			stats := p.Stats()
+			logging.Debug("  Source (mssql): %d/%d active, %d idle, %d waits (%.1fms avg)",
+				stats.InUse, stats.MaxOpenConnections, stats.Idle,
+				stats.WaitCount, float64(stats.WaitDuration)/float64(max(stats.WaitCount, 1)))
+		case *source.PostgresPool:
+			logging.Debug("  Source (postgres): max connections=%d", p.MaxConns())
 		}
-	}
-	totalTime := totalQuery + totalScan + totalWrite
-	if totalTime > 0 {
-		fmt.Println("------------------------------")
-		fmt.Printf("%-25s query=%.1fs (%.0f%%), scan=%.1fs (%.0f%%), write=%.1fs (%.0f%%)\n",
-			"TOTAL",
-			totalQuery.Seconds(), float64(totalQuery)/float64(totalTime)*100,
-			totalScan.Seconds(), float64(totalScan)/float64(totalTime)*100,
-			totalWrite.Seconds(), float64(totalWrite)/float64(totalTime)*100)
+		switch p := o.targetPool.(type) {
+		case *target.Pool:
+			stats := p.Stats()
+			logging.Debug("  Target (postgres): %d/%d active, %d idle, %d acquires (%d waited)",
+				stats.AcquiredConns, stats.MaxConns, stats.IdleConns,
+				stats.AcquireCount, stats.EmptyAcquireCount)
+		case *target.MSSQLPool:
+			logging.Debug("  Target (mssql): max connections=%d", p.MaxConns())
+		}
+
+		// Print profiling stats
+		logging.Debug("\nTransfer Profile (per table):")
+		logging.Debug("------------------------------")
+		var totalQuery, totalScan, totalWrite time.Duration
+		for _, t := range tables {
+			ts := statsMap[t.Name]
+			if ts.stats.Rows > 0 {
+				logging.Debug("%-25s %s", t.Name, ts.stats.String())
+				totalQuery += ts.stats.QueryTime
+				totalScan += ts.stats.ScanTime
+				totalWrite += ts.stats.WriteTime
+			}
+		}
+		totalTime := totalQuery + totalScan + totalWrite
+		if totalTime > 0 {
+			logging.Debug("------------------------------")
+			logging.Debug("%-25s query=%.1fs (%.0f%%), scan=%.1fs (%.0f%%), write=%.1fs (%.0f%%)",
+				"TOTAL",
+				totalQuery.Seconds(), float64(totalQuery)/float64(totalTime)*100,
+				totalScan.Seconds(), float64(totalScan)/float64(totalTime)*100,
+				totalWrite.Seconds(), float64(totalWrite)/float64(totalTime)*100)
+		}
 	}
 
 	if len(errs) > 0 {
@@ -638,28 +647,28 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
 	// Phase 1: Reset sequences
-	fmt.Println("  Resetting sequences...")
+	logging.Debug("  Resetting sequences...")
 	for _, t := range tables {
 		if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &t); err != nil {
-			fmt.Printf("Warning: resetting sequence for %s: %v\n", t.Name, err)
+			logging.Warn("Warning: resetting sequence for %s: %v", t.Name, err)
 		}
 	}
 
 	// Phase 2: Create primary keys
-	fmt.Println("  Creating primary keys...")
+	logging.Debug("  Creating primary keys...")
 	for _, t := range tables {
 		if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
-			fmt.Printf("Warning: creating PK for %s: %v\n", t.Name, err)
+			logging.Warn("Warning: creating PK for %s: %v", t.Name, err)
 		}
 	}
 
 	// Phase 3: Create indexes (if enabled)
 	if o.config.Migration.CreateIndexes {
-		fmt.Println("  Creating indexes...")
+		logging.Debug("  Creating indexes...")
 		for _, t := range tables {
 			for _, idx := range t.Indexes {
 				if err := o.targetPool.CreateIndex(ctx, &t, &idx, o.config.Target.Schema); err != nil {
-					fmt.Printf("Warning: creating index %s on %s: %v\n", idx.Name, t.Name, err)
+					logging.Warn("Warning: creating index %s on %s: %v", idx.Name, t.Name, err)
 				}
 			}
 		}
@@ -667,11 +676,11 @@ func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) erro
 
 	// Phase 4: Create foreign keys (if enabled)
 	if o.config.Migration.CreateForeignKeys {
-		fmt.Println("  Creating foreign keys...")
+		logging.Debug("  Creating foreign keys...")
 		for _, t := range tables {
 			for _, fk := range t.ForeignKeys {
 				if err := o.targetPool.CreateForeignKey(ctx, &t, &fk, o.config.Target.Schema); err != nil {
-					fmt.Printf("Warning: creating FK %s on %s: %v\n", fk.Name, t.Name, err)
+					logging.Warn("Warning: creating FK %s on %s: %v", fk.Name, t.Name, err)
 				}
 			}
 		}
@@ -679,11 +688,11 @@ func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) erro
 
 	// Phase 5: Create check constraints (if enabled)
 	if o.config.Migration.CreateCheckConstraints {
-		fmt.Println("  Creating check constraints...")
+		logging.Debug("  Creating check constraints...")
 		for _, t := range tables {
 			for _, chk := range t.CheckConstraints {
 				if err := o.targetPool.CreateCheckConstraint(ctx, &t, &chk, o.config.Target.Schema); err != nil {
-					fmt.Printf("Warning: creating CHECK %s on %s: %v\n", chk.Name, t.Name, err)
+					logging.Warn("Warning: creating CHECK %s on %s: %v", chk.Name, t.Name, err)
 				}
 			}
 		}
@@ -702,30 +711,30 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 		o.tables = tables
 	}
 
-	fmt.Println("\nValidation Results:")
-	fmt.Println("-------------------")
+	logging.Info("\nValidation Results:")
+	logging.Info("-------------------")
 
 	var failed bool
 	for _, t := range o.tables {
 		// Query fresh counts from both source and target (don't use cached t.RowCount)
 		sourceCount, err := o.sourcePool.GetRowCount(ctx, o.config.Source.Schema, t.Name)
 		if err != nil {
-			fmt.Printf("%-30s ERROR getting source count: %v\n", t.Name, err)
+			logging.Error("%-30s ERROR getting source count: %v", t.Name, err)
 			failed = true
 			continue
 		}
 
 		targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
 		if err != nil {
-			fmt.Printf("%-30s ERROR getting target count: %v\n", t.Name, err)
+			logging.Error("%-30s ERROR getting target count: %v", t.Name, err)
 			failed = true
 			continue
 		}
 
 		if targetCount == sourceCount {
-			fmt.Printf("%-30s OK %d rows\n", t.Name, targetCount)
+			logging.Info("%-30s OK %d rows", t.Name, targetCount)
 		} else {
-			fmt.Printf("%-30s FAIL source=%d target=%d (diff=%d)\n",
+			logging.Error("%-30s FAIL source=%d target=%d (diff=%d)",
 				t.Name, sourceCount, targetCount, sourceCount-targetCount)
 			failed = true
 		}
@@ -744,13 +753,13 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 		sampleSize = 100
 	}
 
-	fmt.Printf("\nSample Validation (n=%d per table):\n", sampleSize)
-	fmt.Println("------------------------------------")
+	logging.Info("\nSample Validation (n=%d per table):", sampleSize)
+	logging.Info("------------------------------------")
 
 	var failed bool
 	for _, t := range o.tables {
 		if !t.HasPK() {
-			fmt.Printf("%-30s SKIP (no PK)\n", t.Name)
+			logging.Debug("%-30s SKIP (no PK)", t.Name)
 			continue
 		}
 
@@ -787,7 +796,7 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 
 		rows, err := o.sourcePool.DB().QueryContext(ctx, sampleQuery)
 		if err != nil {
-			fmt.Printf("%-30s ERROR: %v\n", t.Name, err)
+			logging.Error("%-30s ERROR: %v", t.Name, err)
 			continue
 		}
 
@@ -809,7 +818,7 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 		rows.Close()
 
 		if len(pkTuples) == 0 {
-			fmt.Printf("%-30s SKIP (no rows)\n", t.Name)
+			logging.Debug("%-30s SKIP (no rows)", t.Name)
 			continue
 		}
 
@@ -823,9 +832,9 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 		}
 
 		if missingCount == 0 {
-			fmt.Printf("%-30s OK (%d samples)\n", t.Name, len(pkTuples))
+			logging.Info("%-30s OK (%d samples)", t.Name, len(pkTuples))
 		} else {
-			fmt.Printf("%-30s FAIL (%d/%d missing)\n", t.Name, missingCount, len(pkTuples))
+			logging.Error("%-30s FAIL (%d/%d missing)", t.Name, missingCount, len(pkTuples))
 			failed = true
 		}
 	}
@@ -898,7 +907,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	startTime := time.Now()
-	fmt.Printf("Resuming run: %s (started %s)\n", run.ID, run.StartedAt.Format(time.RFC3339))
+	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
 
 	// Reset any running tasks to pending
 	if err := o.state.MarkRunAsResumed(run.ID); err != nil {
@@ -906,7 +915,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Extract schema (needed to know all tables)
-	fmt.Println("Extracting schema...")
+	logging.Info("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -922,7 +931,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	o.tables = tables
-	fmt.Printf("Found %d tables in source\n", len(tables))
+	logging.Info("Found %d tables in source", len(tables))
 
 	// Get tables that were successfully transferred in the previous run
 	completedTables, err := o.state.GetCompletedTables(run.ID)
@@ -949,15 +958,15 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	if len(skippedTables) > 0 {
-		fmt.Printf("Skipping %d already-complete tables: %v\n", len(skippedTables), skippedTables)
+		logging.Debug("Skipping %d already-complete tables: %v", len(skippedTables), skippedTables)
 	}
 
 	if len(tablesToTransfer) == 0 {
-		fmt.Println("All tables already transferred - completing migration")
+		logging.Info("All tables already transferred - completing migration")
 		o.tables = tables // Use all tables for finalize/validate
 
 		// Finalize
-		fmt.Println("Finalizing...")
+		logging.Info("Finalizing...")
 		if err := o.finalize(ctx, tables); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
 			o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -965,7 +974,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 
 		// Validate
-		fmt.Println("Validating...")
+		logging.Info("Validating...")
 		if err := o.Validate(ctx); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
 			o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -973,11 +982,11 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 
 		o.state.CompleteRun(run.ID, "success", "")
-		fmt.Println("Resume complete!")
+		logging.Info("Resume complete!")
 		return nil
 	}
 
-	fmt.Printf("Resuming transfer of %d tables\n", len(tablesToTransfer))
+	logging.Info("Resuming transfer of %d tables", len(tablesToTransfer))
 
 	// For tables that need transfer, ensure target tables exist
 	// Check for chunk-level progress to avoid unnecessary truncation
@@ -1019,7 +1028,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 				}
 				if targetCount < rowsDone {
 					// Target has fewer rows than expected - clear progress and truncate
-					fmt.Printf("  Warning: %s has %d rows but expected %d - restarting transfer\n",
+					logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
 						t.Name, targetCount, rowsDone)
 					o.state.ClearTransferProgress(taskID)
 					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
@@ -1033,13 +1042,13 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Transfer only the incomplete tables
-	fmt.Println("Transferring data...")
+	logging.Info("Transferring data...")
 	if err := o.transferAll(ctx, run.ID, tablesToTransfer); err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			o.state.MarkRunAsResumed(run.ID) // Reset running tasks to pending
-			fmt.Println("Migration interrupted - run 'resume' to continue")
+			logging.Info("Migration interrupted - run 'resume' to continue")
 			return fmt.Errorf("transferring data: %w", err)
 		}
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1049,7 +1058,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Finalize (uses all tables for constraints)
 	o.tables = tables
-	fmt.Println("Finalizing...")
+	logging.Info("Finalizing...")
 	if err := o.finalize(ctx, tables); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -1057,7 +1066,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Validate all tables
-	fmt.Println("Validating...")
+	logging.Info("Validating...")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -1066,9 +1075,9 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Sample validation if enabled
 	if o.config.Migration.SampleValidation {
-		fmt.Println("Running sample validation...")
+		logging.Info("Running sample validation...")
 		if err := o.validateSamples(ctx); err != nil {
-			fmt.Printf("Warning: sample validation failed: %v\n", err)
+			logging.Warn("Warning: sample validation failed: %v", err)
 		}
 	}
 
@@ -1081,7 +1090,8 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	o.state.CompleteRun(run.ID, "success", "")
 	o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
-	fmt.Println("Resume complete!")
+	logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
+		len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
 
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
 	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
 	"github.com/urfave/cli/v2"
@@ -35,6 +36,20 @@ func main() {
 				Name:  "state-file",
 				Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 			},
+			&cli.StringFlag{
+				Name:  "verbosity",
+				Value: "info",
+				Usage: "Log verbosity level (debug, info, warn, error)",
+			},
+		},
+		Before: func(c *cli.Context) error {
+			// Set log level from flag
+			level, err := logging.ParseLevel(c.String("verbosity"))
+			if err != nil {
+				return err
+			}
+			logging.SetLevel(level)
+			return nil
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() == 0 {
