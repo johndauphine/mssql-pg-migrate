@@ -82,4 +82,12 @@ var (
 			BorderForeground(colorPurple).
 			Padding(0, 1).
 			MarginRight(1)
+
+	styleScrollbar = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, false, true). // Left border only
+			BorderForeground(colorGray).
+			Foreground(colorGray)
+
+	styleScrollbarHandle = lipgloss.NewStyle().
+			Foreground(colorPurple)
 )
