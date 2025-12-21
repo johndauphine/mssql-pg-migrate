@@ -969,7 +969,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			o.state.ClearTransferProgress(taskID)
 		} else {
 			// Table exists - check if we have saved chunk progress
-			lastPK, _, _ := progressSaver.GetProgress(taskID)
+			lastPK, rowsDone, _ := progressSaver.GetProgress(taskID)
 
 			if lastPK == nil {
 				// No chunk progress - truncate to ensure clean re-transfer
@@ -977,8 +977,26 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 					o.state.CompleteRun(run.ID, "failed")
 					return fmt.Errorf("truncating table %s: %w", t.Name, err)
 				}
+			} else {
+				// Have chunk progress - verify target row count matches saved progress
+				// If target has fewer rows than saved progress, data was lost; start fresh
+				targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
+				if err != nil {
+					o.state.CompleteRun(run.ID, "failed")
+					return fmt.Errorf("getting row count for %s: %w", t.Name, err)
+				}
+				if targetCount < rowsDone {
+					// Target has fewer rows than expected - clear progress and truncate
+					fmt.Printf("  Warning: %s has %d rows but expected %d - restarting transfer\n",
+						t.Name, targetCount, rowsDone)
+					o.state.ClearTransferProgress(taskID)
+					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+						o.state.CompleteRun(run.ID, "failed")
+						return fmt.Errorf("truncating table %s: %w", t.Name, err)
+					}
+				}
+				// If target has >= rowsDone, resume from saved progress
 			}
-			// If we have chunk progress, don't truncate - transfer.Execute will handle cleanup
 		}
 	}
 

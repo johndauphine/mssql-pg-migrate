@@ -109,6 +109,73 @@ func TestFileState_CreateAndResumeRun(t *testing.T) {
 	t.Logf("Final state file:\n%s", string(data))
 }
 
+func TestFileState_ClearTransferProgress(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateFile := filepath.Join(tmpDir, "state.yaml")
+
+	// Create file state
+	fs, err := NewFileState(stateFile)
+	if err != nil {
+		t.Fatalf("NewFileState: %v", err)
+	}
+
+	// Create a run and task
+	err = fs.CreateRun("test456", "dbo", "public", nil, "", "")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	taskID, err := fs.CreateTask("test456", "transfer", "transfer:dbo.Users")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// Save progress
+	err = fs.SaveTransferProgress(taskID, "Users", nil, 12345, 50000, 100000)
+	if err != nil {
+		t.Fatalf("SaveTransferProgress: %v", err)
+	}
+
+	// Verify progress exists
+	prog, err := fs.GetTransferProgress(taskID)
+	if err != nil {
+		t.Fatalf("GetTransferProgress: %v", err)
+	}
+	if prog == nil {
+		t.Fatal("expected progress before clear")
+	}
+	if prog.RowsDone != 50000 {
+		t.Errorf("RowsDone = %d, want 50000", prog.RowsDone)
+	}
+
+	// Clear progress
+	err = fs.ClearTransferProgress(taskID)
+	if err != nil {
+		t.Fatalf("ClearTransferProgress: %v", err)
+	}
+
+	// Verify progress is cleared
+	prog, err = fs.GetTransferProgress(taskID)
+	if err != nil {
+		t.Fatalf("GetTransferProgress after clear: %v", err)
+	}
+	if prog != nil {
+		t.Errorf("expected no progress after clear, got: %+v", prog)
+	}
+
+	// Verify task status is reset to pending
+	total, pending, _, _, _, err := fs.GetRunStats("test456")
+	if err != nil {
+		t.Fatalf("GetRunStats: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("total = %d, want 1", total)
+	}
+	if pending != 1 {
+		t.Errorf("pending = %d, want 1", pending)
+	}
+}
+
 func TestFileState_LoadExisting(t *testing.T) {
 	// Create temp file with existing state
 	tmpDir := t.TempDir()
