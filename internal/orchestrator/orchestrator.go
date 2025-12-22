@@ -470,6 +470,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	}
 
 	for _, t := range tables {
+		logging.Debug("Processing table %s (rows=%d, large=%v)", t.Name, t.RowCount, t.IsLarge(o.config.Migration.LargeTableThreshold))
 		if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
 			// Partition large tables with keyset pagination (PK-based boundaries)
 			numPartitions := min(
@@ -477,8 +478,9 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				o.config.Migration.MaxPartitions,
 			)
 
-			logging.Debug("  Partitioning %s (%d rows, %d partitions)...", t.Name, t.RowCount, numPartitions)
+			logging.Debug("Getting partition boundaries for %s (%d rows, %d partitions)...", t.Name, t.RowCount, numPartitions)
 			partitions, err := o.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
+			logging.Debug("Got partition boundaries for %s: %d partitions", t.Name, len(partitions))
 			if err != nil {
 				return nil, fmt.Errorf("partitioning %s: %w", t.FullName(), err)
 			}
@@ -551,6 +553,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	}
 
 	// Initialize progress
+	logging.Debug("Created %d jobs, calculating total rows", len(jobs))
 	var totalRows int64
 	for _, j := range jobs {
 		if j.Partition != nil {
@@ -559,7 +562,9 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			totalRows += j.Table.RowCount
 		}
 	}
+	logging.Debug("Setting progress total to %d rows", totalRows)
 	o.progress.SetTotal(totalRows)
+	logging.Debug("Progress initialized")
 
 	// Stats collection per table
 	type tableStats struct {
@@ -586,6 +591,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	}
 
 	// Execute jobs with worker pool
+	logging.Debug("Starting worker pool with %d workers, %d jobs", o.config.Migration.Workers, len(jobs))
 	sem := make(chan struct{}, o.config.Migration.Workers)
 	var wg sync.WaitGroup
 
