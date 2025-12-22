@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -326,7 +327,11 @@ func Execute(
 	} else if job.Table.SupportsKeysetPagination() {
 		// Chunk-level resume: delete any rows beyond the saved lastPK
 		// This handles partial data written after the last saved checkpoint
-		if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK); err != nil {
+		var maxPK any
+		if job.Partition != nil {
+			maxPK = job.Partition.MaxPK
+		}
+		if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK, maxPK); err != nil {
 			logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
 		}
 	}
@@ -345,7 +350,7 @@ func Execute(
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, colTypes, prog, resumeRowsDone)
+	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, colTypes, prog, resumeLastPK, resumeRowsDone)
 }
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
@@ -398,13 +403,22 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 }
 
 // cleanupPartialData removes rows beyond the saved lastPK for chunk-level resume
-func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, tableName, pkCol string, lastPK any) error {
+func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, tableName, pkCol string, lastPK any, maxPK any) error {
 	switch p := tgtPool.(type) {
 	case *target.Pool:
 		// PostgreSQL target
-		deleteQuery := fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1`,
-			schema, tableName, pkCol)
-		result, err := p.Pool().Exec(ctx, deleteQuery, lastPK)
+		var deleteQuery string
+		var result pgx.CommandTag
+		var err error
+		if maxPK != nil {
+			deleteQuery = fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1 AND %q <= $2`,
+				schema, tableName, pkCol, pkCol)
+			result, err = p.Pool().Exec(ctx, deleteQuery, lastPK, maxPK)
+		} else {
+			deleteQuery = fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1`,
+				schema, tableName, pkCol)
+			result, err = p.Pool().Exec(ctx, deleteQuery, lastPK)
+		}
 		if err != nil {
 			return err
 		}
@@ -414,9 +428,20 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 		return nil
 	case *target.MSSQLPool:
 		// SQL Server target
-		deleteQuery := fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1`,
-			schema, tableName, pkCol)
-		result, err := p.DB().ExecContext(ctx, deleteQuery, sql.Named("p1", lastPK))
+		var deleteQuery string
+		var result sql.Result
+		var err error
+		if maxPK != nil {
+			deleteQuery = fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1 AND [%s] <= @p2`,
+				schema, tableName, pkCol, pkCol)
+			result, err = p.DB().ExecContext(ctx, deleteQuery,
+				sql.Named("p1", lastPK),
+				sql.Named("p2", maxPK))
+		} else {
+			deleteQuery = fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1`,
+				schema, tableName, pkCol)
+			result, err = p.DB().ExecContext(ctx, deleteQuery, sql.Named("p1", lastPK))
+		}
 		if err != nil {
 			return err
 		}
@@ -428,6 +453,28 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 	default:
 		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
 	}
+}
+
+func parseResumeRowNum(lastPK any) (int64, bool) {
+	if lastPK == nil {
+		return 0, false
+	}
+	switch v := lastPK.(type) {
+	case int:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), true
+	case string:
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 // executeKeysetPagination uses WHERE pk > last_pk for efficient pagination
@@ -706,6 +753,7 @@ func executeRowNumberPagination(
 	job Job,
 	cols, colTypes []string,
 	prog *progress.Tracker,
+	resumeLastPK any,
 	resumeRowsDone int64,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
@@ -745,8 +793,14 @@ func executeRowNumberPagination(
 
 	// Resume from saved progress if available
 	initialRowNum := startRow
-	if resumeRowsDone > 0 {
-		initialRowNum = resumeRowsDone
+	if resumeRowNum, ok := parseResumeRowNum(resumeLastPK); ok {
+		initialRowNum = resumeRowNum
+	}
+	if initialRowNum < startRow {
+		initialRowNum = startRow
+	}
+	if initialRowNum > endRow {
+		initialRowNum = endRow
 	}
 
 	// Create buffered channel for read-ahead pipeline
@@ -874,7 +928,7 @@ func executeRowNumberPagination(
 
 	// Main consumer loop - reads from chunkChan, dispatches to write pool
 	chunkCount := 0
-	totalTransferred := int64(0)
+	totalTransferred := resumeRowsDone
 	var currentRowNum int64
 	var totalOverlap time.Duration
 	var lastWriteEnd time.Time

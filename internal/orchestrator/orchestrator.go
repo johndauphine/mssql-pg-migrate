@@ -289,7 +289,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Transfer data
 	logging.Info("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
-	tableFailures, err := o.transferAll(ctx, runID, tables)
+	tableFailures, err := o.transferAll(ctx, runID, tables, false)
 	if err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
@@ -445,7 +445,7 @@ func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
 	return filtered
 }
 
-func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table) ([]TableFailure, error) {
+func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table, resume bool) ([]TableFailure, error) {
 	var jobs []transfer.Job
 
 	// Create progress saver for chunk-level resume
@@ -589,15 +589,18 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		statsMap[t.Name] = &tableStats{stats: &transfer.TransferStats{}}
 	}
 
-	// Pre-truncate partitioned tables BEFORE dispatching jobs (prevents race condition)
-	// Non-partitioned tables will be truncated inside transfer.Execute as before
-	truncatedTables := make(map[string]bool)
-	for _, j := range jobs {
-		if j.Partition != nil && !truncatedTables[j.Table.Name] {
-			if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, j.Table.Name); err != nil {
-				return nil, fmt.Errorf("pre-truncating table %s: %w", j.Table.Name, err)
+	// Pre-truncate partitioned tables BEFORE dispatching jobs (prevents race condition).
+	// Skip this on resume so completed partitions aren't wiped.
+	// Non-partitioned tables are truncated inside transfer.Execute as before.
+	if !resume {
+		truncatedTables := make(map[string]bool)
+		for _, j := range jobs {
+			if j.Partition != nil && !truncatedTables[j.Table.Name] {
+				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, j.Table.Name); err != nil {
+					return nil, fmt.Errorf("pre-truncating table %s: %w", j.Table.Name, err)
+				}
+				truncatedTables[j.Table.Name] = true
 			}
-			truncatedTables[j.Table.Name] = true
 		}
 	}
 
@@ -1138,7 +1141,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Transfer only the incomplete tables
 	logging.Info("Transferring data...")
-	tableFailures, err := o.transferAll(ctx, run.ID, tablesToTransfer)
+	tableFailures, err := o.transferAll(ctx, run.ID, tablesToTransfer, true)
 	if err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
