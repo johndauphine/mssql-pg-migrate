@@ -350,6 +350,39 @@ func (c *Config) applyDefaults() {
 		}
 	}
 
+	// MEMORY SAFETY: Ensure we never exceed available memory
+	// Use conservative estimate with 2KB/row (accounts for large text columns)
+	// Limit to 70% of available memory to leave room for OS and other processes
+	maxMemoryBytes := c.autoConfig.AvailableMemoryMB * 1024 * 1024 * 70 / 100
+	conservativeRowSize := int64(2000) // 2KB per row - safer for text-heavy tables
+	for {
+		estimatedMemory := int64(c.Migration.Workers) *
+			int64(c.Migration.ReadAheadBuffers*2) * // read + write buffers
+			int64(c.Migration.ChunkSize) *
+			conservativeRowSize
+
+		if estimatedMemory <= maxMemoryBytes {
+			break // We're within limits
+		}
+
+		// Reduce settings to fit within memory
+		// Priority: reduce buffers first, then chunk size, then workers
+		if c.Migration.ReadAheadBuffers > 4 {
+			c.Migration.ReadAheadBuffers--
+			continue
+		}
+		if c.Migration.ChunkSize > 50000 {
+			c.Migration.ChunkSize = c.Migration.ChunkSize * 80 / 100 // Reduce by 20%
+			continue
+		}
+		if c.Migration.Workers > 4 {
+			c.Migration.Workers--
+			continue
+		}
+		// Can't reduce further, use minimum settings
+		break
+	}
+
 	// Auto-size connection pools based on workers, readers, and writers
 	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
 	minSourceConns := c.Migration.Workers * c.Migration.ParallelReaders
@@ -557,6 +590,36 @@ func formatMemorySize(bytes int64) string {
 	}
 }
 
+// EstimateMemoryUsage calculates expected memory usage given actual row sizes.
+// avgRowSize should be the weighted average row size across all tables.
+// Returns estimated bytes.
+func (c *Config) EstimateMemoryUsage(avgRowSize int64) int64 {
+	if avgRowSize <= 0 {
+		avgRowSize = 500
+	}
+	// Formula: workers * (readers * buffers + writers * buffers) * chunk_size * avg_row_size
+	// Simplified: workers * total_buffers * chunk_size * avg_row_size
+	// Each worker has read-ahead buffers + pending writes
+	totalBuffers := int64(c.Migration.ReadAheadBuffers) * 2 // read + write queues
+	return int64(c.Migration.Workers) * totalBuffers * int64(c.Migration.ChunkSize) * avgRowSize
+}
+
+// FormatMemoryEstimate returns a human-readable memory estimate string.
+func (c *Config) FormatMemoryEstimate(avgRowSize int64) string {
+	mem := c.EstimateMemoryUsage(avgRowSize)
+	return fmt.Sprintf("~%s (%d workers * %d buffers * %d chunk * %d bytes/row)",
+		formatMemorySize(mem),
+		c.Migration.Workers,
+		c.Migration.ReadAheadBuffers*2,
+		c.Migration.ChunkSize,
+		avgRowSize)
+}
+
+// FormatMemorySize exports the formatMemorySize function for use by other packages.
+func FormatMemorySize(bytes int64) string {
+	return formatMemorySize(bytes)
+}
+
 // DebugDump returns a comprehensive configuration dump with auto-tuning explanations
 func (c *Config) DebugDump() string {
 	var b strings.Builder
@@ -688,9 +751,9 @@ func (c *Config) DebugDump() string {
 		b.WriteString("  ExcludeTables: [none]\n")
 	}
 
-	// Memory Estimate
+	// Memory Estimate (conservative estimate, actual may vary based on row content)
 	b.WriteString("\nMemory Estimate:\n")
-	bytesPerRow := int64(500) // average row size estimate
+	bytesPerRow := int64(500) // conservative default - actual sizes queried during schema extraction
 	bufferMemory := int64(c.Migration.Workers) * int64(c.Migration.ReadAheadBuffers) * int64(c.Migration.ChunkSize) * bytesPerRow
 	b.WriteString(fmt.Sprintf("  Buffer Memory: ~%s (%d workers * %d buffers * %d rows * %d bytes/row)\n",
 		formatMemorySize(bufferMemory),
@@ -698,6 +761,7 @@ func (c *Config) DebugDump() string {
 		c.Migration.ReadAheadBuffers,
 		c.Migration.ChunkSize,
 		bytesPerRow))
+	b.WriteString("  Note: Actual memory depends on row sizes. Tables with large text columns use more.\n")
 
 	// Profile (if set)
 	if c.Profile.Name != "" || c.Profile.Description != "" {

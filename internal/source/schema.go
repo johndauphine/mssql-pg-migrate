@@ -4,14 +4,15 @@ import "strings"
 
 // Table represents a source table's metadata
 type Table struct {
-	Schema       string      `json:"schema"`
-	Name         string      `json:"name"`
-	Columns      []Column    `json:"columns"`
-	PrimaryKey   []string    `json:"primary_key"`
-	PKColumns    []Column    `json:"pk_columns"` // Full column metadata for PKs
-	RowCount     int64       `json:"row_count"`
-	Indexes      []Index     `json:"indexes"`
-	ForeignKeys  []ForeignKey `json:"foreign_keys"`
+	Schema           string            `json:"schema"`
+	Name             string            `json:"name"`
+	Columns          []Column          `json:"columns"`
+	PrimaryKey       []string          `json:"primary_key"`
+	PKColumns        []Column          `json:"pk_columns"` // Full column metadata for PKs
+	RowCount         int64             `json:"row_count"`
+	EstimatedRowSize int64             `json:"estimated_row_size"` // Average bytes per row from system stats
+	Indexes          []Index           `json:"indexes"`
+	ForeignKeys      []ForeignKey      `json:"foreign_keys"`
 	CheckConstraints []CheckConstraint `json:"check_constraints"`
 }
 

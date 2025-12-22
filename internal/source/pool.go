@@ -136,6 +136,9 @@ func (p *Pool) ExtractSchema(ctx context.Context, schema string) ([]Table, error
 			return nil, fmt.Errorf("loading row count for %s: %w", t.FullName(), err)
 		}
 
+		// Estimate row size from system statistics
+		t.EstimatedRowSize = EstimateRowSizeFromStats(ctx, p.db, t.Schema, t.Name)
+
 		tables = append(tables, t)
 	}
 
