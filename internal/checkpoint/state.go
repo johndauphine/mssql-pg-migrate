@@ -43,6 +43,7 @@ type Run struct {
 	SourceSchema string
 	TargetSchema string
 	Config       string
+	ConfigHash   string // Hash of config for change detection on resume
 	ProfileName  string
 	ConfigPath   string
 	Error        string // Error message if status is "failed"
