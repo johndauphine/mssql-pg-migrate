@@ -6,6 +6,8 @@ mssql-pg-migrate-*
 # Config with secrets
 *.yaml
 *.yml
+!examples/*.yaml
+!examples/*.yml
 
 # State database
 *.db

@@ -1,0 +1,62 @@
+# Incremental Sync Configuration (Upsert Mode)
+#
+# Upsert mode performs incremental synchronization:
+# - INSERT new rows (not in target)
+# - UPDATE changed rows (all columns compared)
+# - LEAVE rows that exist only in target (no deletes)
+#
+# Requirements:
+# - All tables must have primary keys
+# - Target tables must have matching PK constraints (auto-created if missing)
+#
+# Performance Notes:
+# - Upsert is slower than bulk copy (COPY/TDS bulk) due to:
+#   - Index maintenance during writes
+#   - Row-by-row conflict detection
+#   - Transaction logging of updates
+# - Expect 2-5x slower throughput compared to drop_recreate mode
+# - PostgreSQL uses batched multi-row INSERT...ON CONFLICT
+# - SQL Server uses staging table + MERGE (requires compat level >= 130 for
+#   EXCEPT-based change detection; older versions always update matched rows)
+#
+# Usage:
+#   export MSSQL_PASSWORD="your-mssql-password"
+#   export PG_PASSWORD="your-postgres-password"
+#   ./mssql-pg-migrate -c examples/config-upsert.yaml run
+#
+# For initial sync (empty target), upsert mode behaves like bulk insert.
+# For subsequent syncs, only changed/new rows are processed.
+
+source:
+  type: mssql
+  host: sqlserver.example.com
+  port: 1433
+  database: SourceDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: "true"
+  trust_server_cert: false
+
+target:
+  type: postgres
+  host: postgres.example.com
+  port: 5432
+  database: target_db
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: require
+
+migration:
+  workers: 4
+  chunk_size: 10000       # Smaller chunks recommended for upsert
+  target_mode: upsert     # Enable incremental sync
+
+  # Optional: Filter tables for incremental sync
+  # include_tables:
+  #   - orders
+  #   - customers
+  # exclude_tables:
+  #   - audit_*
+  #   - temp_*

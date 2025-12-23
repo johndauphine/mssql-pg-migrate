@@ -51,6 +51,7 @@ type TargetPool interface {
 	CreateIndex(ctx context.Context, t *source.Table, idx *source.Index, targetSchema string) error
 	CreateForeignKey(ctx context.Context, t *source.Table, fk *source.ForeignKey, targetSchema string) error
 	CreateCheckConstraint(ctx context.Context, t *source.Table, chk *source.CheckConstraint, targetSchema string) error
+	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
 	// Data operations
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)

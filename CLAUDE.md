@@ -68,6 +68,11 @@ examples/                   # Example configuration files
 2. **Write-ahead**: Multiple parallel writers consume from channel
 3. **Chunk-level checkpointing**: Progress saved every 10 chunks for resume
 
+### Target Modes
+- **drop_recreate** (default): Drop and recreate target tables
+- **truncate**: Truncate existing tables, create if missing
+- **upsert**: Incremental sync - INSERT new rows, UPDATE changed rows, preserve target-only rows
+
 ### Pagination Strategies
 - **Keyset pagination**: For single-column integer PKs (fastest)
 - **ROW_NUMBER pagination**: For composite/varchar PKs
@@ -130,12 +135,21 @@ examples/                   # Example configuration files
 
 Config files use YAML with environment variable support (`${VAR_NAME}`).
 
-Key additions:
+Key fields:
 - `profile.name`: Name for profile storage
 - `profile.description`: Description for profile
 - `migration.data_dir`: Directory for state database (auto-created)
+- `migration.target_mode`: `drop_recreate` (default), `truncate`, or `upsert`
 
-See `examples/` directory for complete configurations.
+### Upsert Mode
+Incremental synchronization that preserves target-only data:
+- **Requirements**: All tables must have primary keys
+- **PostgreSQL**: Uses batched `INSERT...ON CONFLICT DO UPDATE` with `IS DISTINCT FROM` change detection
+- **SQL Server**: Uses staging table + `MERGE` with `EXCEPT` change detection (compat level >= 130)
+- **No deletes**: Rows only in target are preserved
+- **Performance**: 2-5x slower than bulk copy due to index maintenance and conflict detection
+
+See `examples/config-upsert.yaml` for a complete example.
 
 ## Building
 

@@ -169,6 +169,20 @@ func (p *Pool) GetRowCount(ctx context.Context, schema, table string) (int64, er
 	return count, err
 }
 
+// HasPrimaryKey checks if a table has a primary key constraint
+func (p *Pool) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
+	var exists bool
+	err := p.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.table_constraints
+			WHERE constraint_type = 'PRIMARY KEY'
+			AND table_schema = $1
+			AND table_name = $2
+		)
+	`, schema, table).Scan(&exists)
+	return exists, err
+}
+
 // ResetSequence resets identity sequence to max value
 func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table) error {
 	// Find identity column
@@ -356,7 +370,7 @@ func convertCheckDefinition(def string) string {
 }
 
 // UpsertChunk performs INSERT ... ON CONFLICT ... DO UPDATE for upsert mode
-// Uses batch processing for performance
+// Uses batched multi-row VALUES for performance (instead of per-row inserts)
 func (p *Pool) UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
@@ -378,8 +392,16 @@ func (p *Pool) UpsertChunk(ctx context.Context, schema, table string, cols []str
 		return fmt.Errorf("setting statement timeout: %w", err)
 	}
 
-	// Build upsert SQL
-	upsertSQL := buildPGUpsertSQL(schema, table, cols, pkCols)
+	// PostgreSQL has a limit of ~65535 parameters per query
+	// Calculate batch size: maxParams / numCols
+	const maxParams = 65000 // Leave some headroom
+	batchSize := maxParams / len(cols)
+	if batchSize > len(rows) {
+		batchSize = len(rows)
+	}
+	if batchSize < 1 {
+		batchSize = 1
+	}
 
 	// Execute in batches using transactions for efficiency
 	tx, err := conn.Begin(ctx)
@@ -388,10 +410,20 @@ func (p *Pool) UpsertChunk(ctx context.Context, schema, table string, cols []str
 	}
 	defer tx.Rollback(ctx)
 
-	for _, row := range rows {
-		_, err := tx.Exec(ctx, upsertSQL, row...)
+	// Process rows in batches
+	for i := 0; i < len(rows); i += batchSize {
+		end := i + batchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		batch := rows[i:end]
+
+		// Build batched upsert SQL with multi-row VALUES
+		upsertSQL, args := buildPGBatchedUpsertSQL(schema, table, cols, pkCols, batch)
+
+		_, err := tx.Exec(ctx, upsertSQL, args...)
 		if err != nil {
-			return fmt.Errorf("executing upsert: %w", err)
+			return fmt.Errorf("executing batched upsert: %w", err)
 		}
 	}
 
@@ -402,19 +434,18 @@ func (p *Pool) UpsertChunk(ctx context.Context, schema, table string, cols []str
 	return nil
 }
 
-// buildPGUpsertSQL generates PostgreSQL upsert statement
-// INSERT INTO schema.table (cols) VALUES ($1, $2, ...)
+// buildPGBatchedUpsertSQL generates PostgreSQL batched upsert statement with multi-row VALUES
+// INSERT INTO schema.table (cols) VALUES ($1, $2, ...), ($N+1, $N+2, ...), ...
 // ON CONFLICT (pk_cols) DO UPDATE SET col1 = EXCLUDED.col1, ...
 // WHERE (table.col1, ...) IS DISTINCT FROM (EXCLUDED.col1, ...)
-func buildPGUpsertSQL(schema, table string, cols []string, pkCols []string) string {
+func buildPGBatchedUpsertSQL(schema, table string, cols []string, pkCols []string, rows [][]any) (string, []any) {
 	var sb strings.Builder
+	numCols := len(cols)
 
-	// Build column list and parameter placeholders
-	quotedCols := make([]string, len(cols))
-	params := make([]string, len(cols))
+	// Build column list
+	quotedCols := make([]string, numCols)
 	for i, col := range cols {
 		quotedCols[i] = quotePGIdent(col)
-		params[i] = fmt.Sprintf("$%d", i+1)
 	}
 
 	// Build PK column list for ON CONFLICT
@@ -440,11 +471,25 @@ func buildPGUpsertSQL(schema, table string, cols []string, pkCols []string) stri
 		}
 	}
 
-	// INSERT INTO schema.table (cols) VALUES ($1, $2, ...)
-	sb.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+	// Build multi-row VALUES clause and flatten args
+	args := make([]any, 0, len(rows)*numCols)
+	valueTuples := make([]string, len(rows))
+
+	for rowIdx, row := range rows {
+		params := make([]string, numCols)
+		for colIdx := range cols {
+			paramNum := rowIdx*numCols + colIdx + 1
+			params[colIdx] = fmt.Sprintf("$%d", paramNum)
+			args = append(args, row[colIdx])
+		}
+		valueTuples[rowIdx] = "(" + strings.Join(params, ", ") + ")"
+	}
+
+	// INSERT INTO schema.table (cols) VALUES (...), (...), ...
+	sb.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
 		qualifyPGTable(schema, table),
 		strings.Join(quotedCols, ", "),
-		strings.Join(params, ", ")))
+		strings.Join(valueTuples, ", ")))
 
 	// ON CONFLICT (pk_cols)
 	sb.WriteString(fmt.Sprintf(" ON CONFLICT (%s)", strings.Join(quotedPKs, ", ")))
@@ -461,5 +506,5 @@ func buildPGUpsertSQL(schema, table string, cols []string, pkCols []string) stri
 		sb.WriteString(" DO NOTHING")
 	}
 
-	return sb.String()
+	return sb.String(), args
 }

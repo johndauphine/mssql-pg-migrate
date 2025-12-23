@@ -19,6 +19,7 @@ type MSSQLPool struct {
 	config       *config.TargetConfig
 	maxConns     int
 	rowsPerBatch int // Hint for bulk copy optimizer
+	compatLevel  int // Database compatibility level (e.g., 130 for SQL Server 2016)
 }
 
 // NewMSSQLPool creates a new SQL Server target connection pool
@@ -46,11 +47,24 @@ func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MS
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
+	// Query database compatibility level (used for MERGE/EXCEPT support check)
+	var compatLevel int
+	err = db.QueryRow(`
+		SELECT compatibility_level
+		FROM sys.databases
+		WHERE name = DB_NAME()
+	`).Scan(&compatLevel)
+	if err != nil {
+		// Non-fatal - just log and continue with level 0
+		compatLevel = 0
+	}
+
 	return &MSSQLPool{
 		db:           db,
 		config:       cfg,
 		maxConns:     maxConns,
 		rowsPerBatch: rowsPerBatch,
+		compatLevel:  compatLevel,
 	}, nil
 }
 
@@ -72,6 +86,11 @@ func (p *MSSQLPool) MaxConns() int {
 // DBType returns the database type
 func (p *MSSQLPool) DBType() string {
 	return "mssql"
+}
+
+// CompatLevel returns the database compatibility level (e.g., 130 for SQL Server 2016)
+func (p *MSSQLPool) CompatLevel() int {
+	return p.compatLevel
 }
 
 // CreateSchema creates the target schema if it doesn't exist
@@ -162,6 +181,20 @@ func (p *MSSQLPool) GetRowCount(ctx context.Context, schema, table string) (int6
 	var count int64
 	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyMSSQLTable(schema, table))).Scan(&count)
 	return count, err
+}
+
+// HasPrimaryKey checks if a table has a primary key constraint
+func (p *MSSQLPool) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
+	var exists int
+	err := p.db.QueryRowContext(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+			WHERE CONSTRAINT_TYPE = 'PRIMARY KEY'
+			AND TABLE_SCHEMA = @schema
+			AND TABLE_NAME = @table
+		) THEN 1 ELSE 0 END
+	`, sql.Named("schema", schema), sql.Named("table", table)).Scan(&exists)
+	return exists == 1, err
 }
 
 // ResetSequence resets identity sequence to max value
@@ -404,7 +437,10 @@ func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols 
 	stmt.Close()
 
 	// 3. Execute MERGE
-	mergeSQL := buildMSSQLMergeSQL(schema, table, stagingTable, cols, pkCols)
+	// Use EXCEPT-based change detection only for compat level >= 130 (SQL Server 2016+)
+	// For older versions, fall back to always-update (less efficient but compatible)
+	useExcept := p.compatLevel >= 130
+	mergeSQL := buildMSSQLMergeSQL(schema, table, stagingTable, cols, pkCols, useExcept)
 	if _, err := txn.ExecContext(ctx, mergeSQL); err != nil {
 		return fmt.Errorf("executing merge: %w", err)
 	}
@@ -424,7 +460,10 @@ func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols 
 // USING staging AS s ON t.pk = s.pk
 // WHEN MATCHED AND EXISTS(SELECT s.* EXCEPT SELECT t.*) THEN UPDATE SET ...
 // WHEN NOT MATCHED THEN INSERT (cols) VALUES (s.cols);
-func buildMSSQLMergeSQL(schema, table, stagingTable string, cols []string, pkCols []string) string {
+//
+// useExcept: If true, use EXCEPT for change detection (requires compat level >= 130).
+// If false, always update matched rows (less efficient but compatible with older SQL Server).
+func buildMSSQLMergeSQL(schema, table, stagingTable string, cols []string, pkCols []string, useExcept bool) string {
 	var sb strings.Builder
 
 	// Build ON clause for PK matching
@@ -453,27 +492,31 @@ func buildMSSQLMergeSQL(schema, table, stagingTable string, cols []string, pkCol
 		srcCols[i] = fmt.Sprintf("src.%s", quoteMSSQLIdent(col))
 	}
 
-	// Build source columns for change detection
-	srcColsForCompare := make([]string, 0, len(cols))
-	targetColsForCompare := make([]string, 0, len(cols))
-	for _, col := range cols {
-		if !pkSet[col] {
-			srcColsForCompare = append(srcColsForCompare, fmt.Sprintf("src.%s", quoteMSSQLIdent(col)))
-			targetColsForCompare = append(targetColsForCompare, fmt.Sprintf("target.%s", quoteMSSQLIdent(col)))
-		}
-	}
-
 	sb.WriteString(fmt.Sprintf("MERGE INTO %s AS target\n", qualifyMSSQLTable(schema, table)))
 	sb.WriteString(fmt.Sprintf("USING %s AS src\n", stagingTable))
 	sb.WriteString(fmt.Sprintf("ON (%s)\n", strings.Join(onClauses, " AND ")))
 
 	if len(setClauses) > 0 {
-		// WHEN MATCHED AND (change detection using EXCEPT)
-		sb.WriteString("WHEN MATCHED AND EXISTS(\n")
-		sb.WriteString(fmt.Sprintf("  SELECT %s\n  EXCEPT\n  SELECT %s\n) THEN\n",
-			strings.Join(srcColsForCompare, ", "),
-			strings.Join(targetColsForCompare, ", ")))
-		sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
+		if useExcept {
+			// WHEN MATCHED AND (change detection using EXCEPT) - SQL Server 2016+
+			srcColsForCompare := make([]string, 0, len(cols))
+			targetColsForCompare := make([]string, 0, len(cols))
+			for _, col := range cols {
+				if !pkSet[col] {
+					srcColsForCompare = append(srcColsForCompare, fmt.Sprintf("src.%s", quoteMSSQLIdent(col)))
+					targetColsForCompare = append(targetColsForCompare, fmt.Sprintf("target.%s", quoteMSSQLIdent(col)))
+				}
+			}
+			sb.WriteString("WHEN MATCHED AND EXISTS(\n")
+			sb.WriteString(fmt.Sprintf("  SELECT %s\n  EXCEPT\n  SELECT %s\n) THEN\n",
+				strings.Join(srcColsForCompare, ", "),
+				strings.Join(targetColsForCompare, ", ")))
+			sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
+		} else {
+			// WHEN MATCHED - always update (less efficient, but compatible with older SQL Server)
+			sb.WriteString("WHEN MATCHED THEN\n")
+			sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
+		}
 	}
 
 	sb.WriteString("WHEN NOT MATCHED BY TARGET THEN\n")
