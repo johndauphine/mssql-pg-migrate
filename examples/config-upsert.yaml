@@ -16,8 +16,8 @@
 #   - Transaction logging of updates
 # - Expect 2-5x slower throughput compared to drop_recreate mode
 # - PostgreSQL uses batched multi-row INSERT...ON CONFLICT
-# - SQL Server uses staging table + MERGE (requires compat level >= 130 for
-#   EXCEPT-based change detection; older versions always update matched rows)
+# - SQL Server uses staging table + UPDATE/INSERT (with EXCEPT-based change
+#   detection for efficiency)
 #
 # Usage:
 #   export MSSQL_PASSWORD="your-mssql-password"

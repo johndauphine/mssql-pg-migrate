@@ -145,7 +145,7 @@ Key fields:
 Incremental synchronization that preserves target-only data:
 - **Requirements**: All tables must have primary keys
 - **PostgreSQL**: Uses batched `INSERT...ON CONFLICT DO UPDATE` with `IS DISTINCT FROM` change detection
-- **SQL Server**: Uses staging table + `MERGE` with `EXCEPT` change detection (compat level >= 130)
+- **SQL Server**: Uses staging table + `UPDATE`/`INSERT` with `EXCEPT` change detection
 - **No deletes**: Rows only in target are preserved
 - **Performance**: 2-5x slower than bulk copy due to index maintenance and conflict detection
 

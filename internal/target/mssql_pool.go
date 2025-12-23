@@ -474,8 +474,8 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 	// Build UPDATE and INSERT SQL templates
 	updateSQL, insertSQL := buildMSSQLUpsertSQL(schema, table, stagingTable, cols, pkCols)
 
-	// For small tables, execute single UPDATE + INSERT
-	if rowCount <= 50000 || maxPK == 0 {
+	// For small tables or degenerate PK ranges, execute single UPDATE + INSERT
+	if rowCount <= 50000 || minPK == maxPK {
 		if updateSQL != "" {
 			if _, err := p.db.ExecContext(ctx, updateSQL+" OPTION(MAXDOP 1)"); err != nil {
 				return fmt.Errorf("executing update: %w", err)
@@ -499,6 +499,13 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 		}
 
 		for start := minPK; start <= maxPK; start += chunkSize {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			end := start + chunkSize - 1
 			if end > maxPK {
 				end = maxPK
