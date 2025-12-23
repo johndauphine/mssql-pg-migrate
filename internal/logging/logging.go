@@ -179,7 +179,14 @@ func (l *Logger) log(level Level, format string, args ...interface{}) {
 			"level": strings.ToLower(level.String()),
 			"msg":   strings.TrimSpace(msg),
 		}
-		data, _ := json.Marshal(logEntry)
+		data, err := json.Marshal(logEntry)
+		if err != nil {
+			// Fallback to text output if JSON marshaling fails
+			timestamp := time.Now().Format("2006-01-02 15:04:05")
+			fallback := fmt.Sprintf("%s [%s] %s (json marshal error: %v)", timestamp, level.String(), strings.TrimSpace(msg), err)
+			fmt.Fprintln(l.output, fallback)
+			return
+		}
 		fmt.Fprintln(l.output, string(data))
 		return
 	}

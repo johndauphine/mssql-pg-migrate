@@ -463,20 +463,14 @@ func showHistory(c *cli.Context) error {
 // getStateFile returns the state file path from the context.
 // Checks both command-level and global flags.
 func getStateFile(c *cli.Context) string {
-	// First check command-level flag (subcommand context)
-	if sf := c.String("state-file"); sf != "" {
-		return sf
-	}
-	// Fall back to global flag (accessed via lineage)
-	for parent := c.Lineage(); parent != nil; {
-		for _, ctx := range parent {
-			if ctx != nil {
-				if sf := ctx.String("state-file"); sf != "" {
-					return sf
-				}
-			}
+	// Check command-level flag first, then walk up the context lineage
+	for _, ctx := range c.Lineage() {
+		if ctx == nil {
+			continue
 		}
-		break
+		if sf := ctx.String("state-file"); sf != "" {
+			return sf
+		}
 	}
 	return ""
 }

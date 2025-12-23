@@ -182,7 +182,7 @@ with DAG('mssql_to_pg_migration', start_date=datetime(2025, 1, 1)) as dag:
                 --log-format=json \
                 --state-file /tmp/{{ dag_run.run_id }}_state.yaml \
                 -c /opt/configs/migration.yaml \
-                run 2>&1
+                run
         ''',
         do_xcom_push=True,  # Captures stdout JSON for downstream tasks
     )

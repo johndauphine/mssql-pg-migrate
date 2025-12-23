@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1670,7 +1671,6 @@ func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult
 		case "failed":
 			tr.Status = "failed"
 			tr.Error = t.ErrorMessage
-			result.TablesFailed++
 		case "running":
 			if tr.Status != "failed" {
 				tr.Status = "running"
@@ -1678,24 +1678,28 @@ func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult
 		}
 	}
 
-	// Build table stats list and count successes
-	for _, tr := range tableMap {
+	// Build table stats list, count successes/failures, and sort for deterministic output
+	tableNames := make([]string, 0, len(tableMap))
+	for name := range tableMap {
+		tableNames = append(tableNames, name)
+	}
+	sort.Strings(tableNames)
+
+	for _, name := range tableNames {
+		tr := tableMap[name]
 		result.TableStats = append(result.TableStats, *tr)
-		if tr.Status == "success" {
+		switch tr.Status {
+		case "success":
 			result.TablesSuccess++
+		case "failed":
+			result.TablesFailed++
+			result.FailedTables = append(result.FailedTables, tr.Name)
 		}
 	}
 
 	result.RowsTransferred = totalRows
 	if result.DurationSeconds > 0 {
 		result.RowsPerSecond = int64(float64(totalRows) / result.DurationSeconds)
-	}
-
-	// Build failed tables list
-	for _, tr := range result.TableStats {
-		if tr.Status == "failed" {
-			result.FailedTables = append(result.FailedTables, tr.Name)
-		}
 	}
 
 	if result.FailedTables == nil {
