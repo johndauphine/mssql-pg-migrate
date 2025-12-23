@@ -353,6 +353,137 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 	return nil
 }
 
+// UpsertChunk performs upsert using a staging table and MERGE for upsert mode
+func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	if len(pkCols) == 0 {
+		return fmt.Errorf("upsert requires primary key columns")
+	}
+
+	// Generate unique staging table name
+	stagingTable := fmt.Sprintf("#staging_%s_%d", table, time.Now().UnixNano())
+
+	// Start transaction
+	txn, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer txn.Rollback()
+
+	// 1. Create staging table (temp table with same structure)
+	createStaging := fmt.Sprintf("SELECT TOP 0 * INTO %s FROM %s",
+		stagingTable, qualifyMSSQLTable(schema, table))
+	if _, err := txn.ExecContext(ctx, createStaging); err != nil {
+		return fmt.Errorf("creating staging table: %w", err)
+	}
+
+	// 2. Bulk insert into staging table
+	rowsPerBatch := p.rowsPerBatch
+	if rowsPerBatch <= 0 || rowsPerBatch > len(rows) {
+		rowsPerBatch = len(rows)
+	}
+	bulkOpts := mssql.BulkOptions{RowsPerBatch: rowsPerBatch}
+	stmt, err := txn.PrepareContext(ctx, mssql.CopyIn(stagingTable, bulkOpts, cols...))
+	if err != nil {
+		return fmt.Errorf("preparing bulk copy to staging: %w", err)
+	}
+
+	for _, row := range rows {
+		if _, err = stmt.ExecContext(ctx, row...); err != nil {
+			stmt.Close()
+			return fmt.Errorf("bulk copy row to staging: %w", err)
+		}
+	}
+	if _, err = stmt.ExecContext(ctx); err != nil {
+		stmt.Close()
+		return fmt.Errorf("flushing bulk copy to staging: %w", err)
+	}
+	stmt.Close()
+
+	// 3. Execute MERGE
+	mergeSQL := buildMSSQLMergeSQL(schema, table, stagingTable, cols, pkCols)
+	if _, err := txn.ExecContext(ctx, mergeSQL); err != nil {
+		return fmt.Errorf("executing merge: %w", err)
+	}
+
+	// 4. Drop staging table (optional, happens on connection close anyway for temp tables)
+	txn.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s", stagingTable))
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("committing merge: %w", err)
+	}
+
+	return nil
+}
+
+// buildMSSQLMergeSQL generates SQL Server MERGE statement
+// MERGE INTO target AS t
+// USING staging AS s ON t.pk = s.pk
+// WHEN MATCHED AND EXISTS(SELECT s.* EXCEPT SELECT t.*) THEN UPDATE SET ...
+// WHEN NOT MATCHED THEN INSERT (cols) VALUES (s.cols);
+func buildMSSQLMergeSQL(schema, table, stagingTable string, cols []string, pkCols []string) string {
+	var sb strings.Builder
+
+	// Build ON clause for PK matching
+	onClauses := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		onClauses[i] = fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
+	}
+
+	// Build SET clause (exclude PK columns)
+	pkSet := make(map[string]bool)
+	for _, pk := range pkCols {
+		pkSet[pk] = true
+	}
+	var setClauses []string
+	for _, col := range cols {
+		if !pkSet[col] {
+			setClauses = append(setClauses, fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
+		}
+	}
+
+	// Build INSERT columns and values
+	quotedCols := make([]string, len(cols))
+	srcCols := make([]string, len(cols))
+	for i, col := range cols {
+		quotedCols[i] = quoteMSSQLIdent(col)
+		srcCols[i] = fmt.Sprintf("src.%s", quoteMSSQLIdent(col))
+	}
+
+	// Build source columns for change detection
+	srcColsForCompare := make([]string, 0, len(cols))
+	targetColsForCompare := make([]string, 0, len(cols))
+	for _, col := range cols {
+		if !pkSet[col] {
+			srcColsForCompare = append(srcColsForCompare, fmt.Sprintf("src.%s", quoteMSSQLIdent(col)))
+			targetColsForCompare = append(targetColsForCompare, fmt.Sprintf("target.%s", quoteMSSQLIdent(col)))
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("MERGE INTO %s AS target\n", qualifyMSSQLTable(schema, table)))
+	sb.WriteString(fmt.Sprintf("USING %s AS src\n", stagingTable))
+	sb.WriteString(fmt.Sprintf("ON (%s)\n", strings.Join(onClauses, " AND ")))
+
+	if len(setClauses) > 0 {
+		// WHEN MATCHED AND (change detection using EXCEPT)
+		sb.WriteString("WHEN MATCHED AND EXISTS(\n")
+		sb.WriteString(fmt.Sprintf("  SELECT %s\n  EXCEPT\n  SELECT %s\n) THEN\n",
+			strings.Join(srcColsForCompare, ", "),
+			strings.Join(targetColsForCompare, ", ")))
+		sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
+	}
+
+	sb.WriteString("WHEN NOT MATCHED BY TARGET THEN\n")
+	sb.WriteString(fmt.Sprintf("  INSERT (%s) VALUES (%s);",
+		strings.Join(quotedCols, ", "),
+		strings.Join(srcCols, ", ")))
+
+	return sb.String()
+}
+
 // GenerateMSSQLDDL generates SQL Server DDL from source table metadata
 func GenerateMSSQLDDL(t *source.Table, targetSchema string) string {
 	var sb strings.Builder

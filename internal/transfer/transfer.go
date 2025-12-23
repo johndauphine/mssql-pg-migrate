@@ -310,30 +310,33 @@ func Execute(
 		}
 	}
 
-	// Handle truncation based on job type (skip if resuming)
-	if resumeLastPK == nil {
-		if job.Partition == nil {
-			// Non-partitioned table: truncate here (no race possible)
-			if err := tgtPool.TruncateTable(ctx, cfg.Target.Schema, job.Table.Name); err != nil {
-				// Ignore truncate errors (table might not exist)
-			}
-		} else {
-			// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
-			if job.Table.SupportsKeysetPagination() {
-				if err := cleanupPartitionDataGeneric(ctx, tgtPool, cfg.Target.Schema, &job); err != nil {
-					logging.Warn("Partition cleanup failed for %s: %v", job.Table.Name, err)
+	// Handle truncation based on job type (skip if resuming or in upsert mode)
+	// Upsert mode: no truncation needed, upserts are idempotent
+	if cfg.Migration.TargetMode != "upsert" {
+		if resumeLastPK == nil {
+			if job.Partition == nil {
+				// Non-partitioned table: truncate here (no race possible)
+				if err := tgtPool.TruncateTable(ctx, cfg.Target.Schema, job.Table.Name); err != nil {
+					// Ignore truncate errors (table might not exist)
+				}
+			} else {
+				// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
+				if job.Table.SupportsKeysetPagination() {
+					if err := cleanupPartitionDataGeneric(ctx, tgtPool, cfg.Target.Schema, &job); err != nil {
+						logging.Warn("Partition cleanup failed for %s: %v", job.Table.Name, err)
+					}
 				}
 			}
-		}
-	} else if job.Table.SupportsKeysetPagination() {
-		// Chunk-level resume: delete any rows beyond the saved lastPK
-		// This handles partial data written after the last saved checkpoint
-		var maxPK any
-		if job.Partition != nil {
-			maxPK = job.Partition.MaxPK
-		}
-		if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK, maxPK); err != nil {
-			logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
+		} else if job.Table.SupportsKeysetPagination() {
+			// Chunk-level resume: delete any rows beyond the saved lastPK
+			// This handles partial data written after the last saved checkpoint
+			var maxPK any
+			if job.Partition != nil {
+				maxPK = job.Partition.MaxPK
+			}
+			if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK, maxPK); err != nil {
+				logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
+			}
 		}
 	}
 
@@ -637,6 +640,8 @@ func executeKeysetPagination(
 	defer cancelWriters()
 
 	// Start write workers
+	useUpsert := cfg.Migration.TargetMode == "upsert"
+	pkCols := job.Table.PrimaryKey
 	for i := 0; i < numWriters; i++ {
 		writerWg.Add(1)
 		go func() {
@@ -649,7 +654,13 @@ func executeKeysetPagination(
 				}
 
 				writeStart := time.Now()
-				if err := writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows); err != nil {
+				var err error
+				if useUpsert {
+					err = writeChunkUpsert(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, pkCols, rows)
+				} else {
+					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows)
+				}
+				if err != nil {
 					writeErr.CompareAndSwap(nil, &err)
 					cancelWriters()
 					return
@@ -899,6 +910,8 @@ func executeRowNumberPagination(
 	defer cancelWriters()
 
 	// Start write workers
+	useUpsert := cfg.Migration.TargetMode == "upsert"
+	upsertPKCols := job.Table.PrimaryKey // Use separate variable to avoid shadowing pkCols used for ORDER BY
 	for i := 0; i < numWriters; i++ {
 		writerWg.Add(1)
 		go func() {
@@ -911,7 +924,13 @@ func executeRowNumberPagination(
 				}
 
 				writeStart := time.Now()
-				if err := writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows); err != nil {
+				var err error
+				if useUpsert {
+					err = writeChunkUpsert(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, upsertPKCols, rows)
+				} else {
+					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows)
+				}
+				if err != nil {
 					writeErr.CompareAndSwap(nil, &err)
 					cancelWriters()
 					return
@@ -1168,6 +1187,11 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 	default:
 		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
 	}
+}
+
+// writeChunkUpsert writes a chunk of data using upsert (INSERT ON CONFLICT / MERGE)
+func writeChunkUpsert(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, pkCols []string, rows [][]any) error {
+	return tgtPool.UpsertChunk(ctx, schema, table, cols, pkCols, rows)
 }
 
 // ValidateBinaryData ensures binary data is properly formatted

@@ -307,7 +307,40 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		return fmt.Errorf("creating schema: %w", err)
 	}
 
-	if o.config.Migration.TargetMode == "truncate" {
+	if o.config.Migration.TargetMode == "upsert" {
+		logging.Info("Preparing target tables (upsert mode)...")
+		for i, t := range tables {
+			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
+			// Validate table has PK for upsert (required for ON CONFLICT / MERGE)
+			if !t.HasPK() {
+				o.state.CompleteRun(runID, "failed", fmt.Sprintf("table %s has no primary key", t.Name))
+				err := fmt.Errorf("table %s has no primary key - upsert mode requires primary keys", t.Name)
+				o.notifyFailure(runID, err, time.Since(startTime))
+				return err
+			}
+			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
+			if err != nil {
+				o.state.CompleteRun(runID, "failed", err.Error())
+				o.notifyFailure(runID, err, time.Since(startTime))
+				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
+			}
+			if !exists {
+				// Create table if it doesn't exist
+				if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+					o.state.CompleteRun(runID, "failed", err.Error())
+					o.notifyFailure(runID, err, time.Since(startTime))
+					return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+				}
+				// Create PK immediately for upsert mode (needed for ON CONFLICT)
+				if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
+					o.state.CompleteRun(runID, "failed", err.Error())
+					o.notifyFailure(runID, err, time.Since(startTime))
+					return fmt.Errorf("creating primary key for %s: %w", t.Name, err)
+				}
+			}
+			// Do NOT truncate - upsert mode preserves existing data
+		}
+	} else if o.config.Migration.TargetMode == "truncate" {
 		logging.Info("Preparing target tables (truncate mode)...")
 		for i, t := range tables {
 			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
@@ -654,8 +687,9 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	// Pre-truncate partitioned tables BEFORE dispatching jobs (prevents race condition).
 	// Skip this on resume so completed partitions aren't wiped.
+	// Skip this in upsert mode - upserts are idempotent and don't require truncation.
 	// Non-partitioned tables are truncated inside transfer.Execute as before.
-	if !resume {
+	if !resume && o.config.Migration.TargetMode != "upsert" {
 		truncatedTables := make(map[string]bool)
 		for _, j := range jobs {
 			if j.Partition != nil && !truncatedTables[j.Table.Name] {

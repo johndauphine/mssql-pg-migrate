@@ -56,6 +56,10 @@ type TargetPool interface {
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)
 	ResetSequence(ctx context.Context, schema string, t *source.Table) error
 
+	// UpsertChunk performs INSERT ON CONFLICT (PG) or MERGE (MSSQL) for upsert mode
+	// pkCols identifies the primary key columns for conflict detection
+	UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error
+
 	// Pool info
 	MaxConns() int
 	DBType() string // "mssql" or "postgres"

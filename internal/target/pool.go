@@ -354,3 +354,112 @@ func convertCheckDefinition(def string) string {
 
 	return result
 }
+
+// UpsertChunk performs INSERT ... ON CONFLICT ... DO UPDATE for upsert mode
+// Uses batch processing for performance
+func (p *Pool) UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	if len(pkCols) == 0 {
+		return fmt.Errorf("upsert requires primary key columns")
+	}
+
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Release()
+
+	// Disable statement timeout for bulk operations
+	_, err = conn.Exec(ctx, "SET statement_timeout = 0")
+	if err != nil {
+		return fmt.Errorf("setting statement timeout: %w", err)
+	}
+
+	// Build upsert SQL
+	upsertSQL := buildPGUpsertSQL(schema, table, cols, pkCols)
+
+	// Execute in batches using transactions for efficiency
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	for _, row := range rows {
+		_, err := tx.Exec(ctx, upsertSQL, row...)
+		if err != nil {
+			return fmt.Errorf("executing upsert: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
+}
+
+// buildPGUpsertSQL generates PostgreSQL upsert statement
+// INSERT INTO schema.table (cols) VALUES ($1, $2, ...)
+// ON CONFLICT (pk_cols) DO UPDATE SET col1 = EXCLUDED.col1, ...
+// WHERE (table.col1, ...) IS DISTINCT FROM (EXCLUDED.col1, ...)
+func buildPGUpsertSQL(schema, table string, cols []string, pkCols []string) string {
+	var sb strings.Builder
+
+	// Build column list and parameter placeholders
+	quotedCols := make([]string, len(cols))
+	params := make([]string, len(cols))
+	for i, col := range cols {
+		quotedCols[i] = quotePGIdent(col)
+		params[i] = fmt.Sprintf("$%d", i+1)
+	}
+
+	// Build PK column list for ON CONFLICT
+	quotedPKs := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		quotedPKs[i] = quotePGIdent(pk)
+	}
+
+	// Build SET clause (exclude PK columns)
+	pkSet := make(map[string]bool)
+	for _, pk := range pkCols {
+		pkSet[pk] = true
+	}
+
+	var setClauses []string
+	var targetCols []string
+	var excludedCols []string
+	for _, col := range cols {
+		if !pkSet[col] {
+			setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", quotePGIdent(col), quotePGIdent(col)))
+			targetCols = append(targetCols, quotePGIdent(table)+"."+quotePGIdent(col))
+			excludedCols = append(excludedCols, "EXCLUDED."+quotePGIdent(col))
+		}
+	}
+
+	// INSERT INTO schema.table (cols) VALUES ($1, $2, ...)
+	sb.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		qualifyPGTable(schema, table),
+		strings.Join(quotedCols, ", "),
+		strings.Join(params, ", ")))
+
+	// ON CONFLICT (pk_cols)
+	sb.WriteString(fmt.Sprintf(" ON CONFLICT (%s)", strings.Join(quotedPKs, ", ")))
+
+	if len(setClauses) > 0 {
+		// DO UPDATE SET col1 = EXCLUDED.col1, ...
+		sb.WriteString(fmt.Sprintf(" DO UPDATE SET %s", strings.Join(setClauses, ", ")))
+		// WHERE clause for change detection (skip update if no changes)
+		sb.WriteString(fmt.Sprintf(" WHERE (%s) IS DISTINCT FROM (%s)",
+			strings.Join(targetCols, ", "),
+			strings.Join(excludedCols, ", ")))
+	} else {
+		// All columns are PK - DO NOTHING
+		sb.WriteString(" DO NOTHING")
+	}
+
+	return sb.String()
+}
