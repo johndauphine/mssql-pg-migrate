@@ -51,10 +51,26 @@ type TargetPool interface {
 	CreateIndex(ctx context.Context, t *source.Table, idx *source.Index, targetSchema string) error
 	CreateForeignKey(ctx context.Context, t *source.Table, fk *source.ForeignKey, targetSchema string) error
 	CreateCheckConstraint(ctx context.Context, t *source.Table, chk *source.CheckConstraint, targetSchema string) error
+	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
 	// Data operations
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)
 	ResetSequence(ctx context.Context, schema string, t *source.Table) error
+
+	// UpsertChunk performs INSERT ON CONFLICT (PG) or stages data for MERGE (MSSQL)
+	// pkCols identifies the primary key columns for conflict detection
+	UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error
+
+	// PrepareUpsertStaging prepares staging table before transfer (MSSQL only, no-op for PG)
+	PrepareUpsertStaging(ctx context.Context, schema, table string) error
+
+	// ExecuteUpsertMerge runs final MERGE after all chunks staged (MSSQL only, no-op for PG)
+	// mergeChunkSize controls the chunk size for UPDATE+INSERT operations (0 = use default)
+	ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string, mergeChunkSize int) error
+
+	// CheckUpsertStagingReady checks if staging table exists and has data (for resume)
+	// Returns (exists, rowCount, error) - used to skip bulk insert on resume if staging is ready
+	CheckUpsertStagingReady(ctx context.Context, schema, table string) (bool, int64, error)
 
 	// Pool info
 	MaxConns() int

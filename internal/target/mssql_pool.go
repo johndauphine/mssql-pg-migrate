@@ -19,6 +19,7 @@ type MSSQLPool struct {
 	config       *config.TargetConfig
 	maxConns     int
 	rowsPerBatch int // Hint for bulk copy optimizer
+	compatLevel  int // Database compatibility level (e.g., 130 for SQL Server 2016)
 }
 
 // NewMSSQLPool creates a new SQL Server target connection pool
@@ -46,11 +47,24 @@ func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MS
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
+	// Query database compatibility level (used for MERGE/EXCEPT support check)
+	var compatLevel int
+	err = db.QueryRow(`
+		SELECT compatibility_level
+		FROM sys.databases
+		WHERE name = DB_NAME()
+	`).Scan(&compatLevel)
+	if err != nil {
+		// Non-fatal - just log and continue with level 0
+		compatLevel = 0
+	}
+
 	return &MSSQLPool{
 		db:           db,
 		config:       cfg,
 		maxConns:     maxConns,
 		rowsPerBatch: rowsPerBatch,
+		compatLevel:  compatLevel,
 	}, nil
 }
 
@@ -72,6 +86,11 @@ func (p *MSSQLPool) MaxConns() int {
 // DBType returns the database type
 func (p *MSSQLPool) DBType() string {
 	return "mssql"
+}
+
+// CompatLevel returns the database compatibility level (e.g., 130 for SQL Server 2016)
+func (p *MSSQLPool) CompatLevel() int {
+	return p.compatLevel
 }
 
 // CreateSchema creates the target schema if it doesn't exist
@@ -162,6 +181,20 @@ func (p *MSSQLPool) GetRowCount(ctx context.Context, schema, table string) (int6
 	var count int64
 	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyMSSQLTable(schema, table))).Scan(&count)
 	return count, err
+}
+
+// HasPrimaryKey checks if a table has a primary key constraint
+func (p *MSSQLPool) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
+	var exists int
+	err := p.db.QueryRowContext(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+			WHERE CONSTRAINT_TYPE = 'PRIMARY KEY'
+			AND TABLE_SCHEMA = @schema
+			AND TABLE_NAME = @table
+		) THEN 1 ELSE 0 END
+	`, sql.Named("schema", schema), sql.Named("table", table)).Scan(&exists)
+	return exists == 1, err
 }
 
 // ResetSequence resets identity sequence to max value
@@ -351,6 +384,320 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 	}
 
 	return nil
+}
+
+// UpsertChunk for MSSQL uses whole-table staging approach:
+// - Bulk loads data into staging table (fast, using existing WriteChunk logic)
+// - MERGE runs once at the end via ExecuteUpsertMerge
+func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	// Write to staging table instead of target (bulk copy is fast)
+	stagingTable := fmt.Sprintf("staging_%s", table)
+	return p.WriteChunk(ctx, schema, stagingTable, cols, rows)
+}
+
+// CheckUpsertStagingReady checks if staging table exists and has data (for resume)
+// Returns (exists, rowCount, error)
+func (p *MSSQLPool) CheckUpsertStagingReady(ctx context.Context, schema, table string) (bool, int64, error) {
+	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+
+	// Check if staging table exists and get row count
+	sql := fmt.Sprintf(`
+		IF OBJECT_ID('%s', 'U') IS NOT NULL
+			SELECT CAST(1 AS BIT), COUNT_BIG(*) FROM %s
+		ELSE
+			SELECT CAST(0 AS BIT), CAST(0 AS BIGINT)`,
+		stagingTable, stagingTable)
+
+	var exists bool
+	var rowCount int64
+	if err := p.db.QueryRowContext(ctx, sql).Scan(&exists, &rowCount); err != nil {
+		return false, 0, fmt.Errorf("checking staging table: %w", err)
+	}
+
+	return exists, rowCount, nil
+}
+
+// PrepareUpsertStaging creates the staging table before transfer
+func (p *MSSQLPool) PrepareUpsertStaging(ctx context.Context, schema, table string) error {
+	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+	targetTable := qualifyMSSQLTable(schema, table)
+
+	// Drop if exists and create fresh staging table with same structure
+	sql := fmt.Sprintf(`
+		IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s;
+		SELECT * INTO %s FROM %s WHERE 1=0`,
+		stagingTable, stagingTable, stagingTable, targetTable)
+
+	_, err := p.db.ExecContext(ctx, sql)
+	return err
+}
+
+// ExecuteUpsertMerge runs chunked UPDATE + INSERT operations after all data is staged
+// Uses separate UPDATE and INSERT statements instead of MERGE for better performance
+// mergeChunkSize controls the chunk size for UPDATE+INSERT operations (0 = use default 5000)
+func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string, mergeChunkSize int) error {
+	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+
+	// Get row count and min/max PK from staging table
+	var rowCount int64
+	var minPK, maxPK int64
+	pkCol := pkCols[0] // Use first PK column for chunking
+
+	countSQL := fmt.Sprintf("SELECT COUNT(*), ISNULL(MIN(%s), 0), ISNULL(MAX(%s), 0) FROM %s",
+		quoteMSSQLIdent(pkCol), quoteMSSQLIdent(pkCol), stagingTable)
+	if err := p.db.QueryRowContext(ctx, countSQL).Scan(&rowCount, &minPK, &maxPK); err != nil {
+		return fmt.Errorf("getting staging table stats: %w", err)
+	}
+
+	if rowCount == 0 {
+		// Nothing to upsert, just cleanup
+		p.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable))
+		return nil
+	}
+
+	// Create index on staging table PK for efficient chunked operations
+	indexName := fmt.Sprintf("IX_staging_%s_pk", table)
+	var pkColList []string
+	for _, pk := range pkCols {
+		pkColList = append(pkColList, quoteMSSQLIdent(pk))
+	}
+	indexSQL := fmt.Sprintf("CREATE CLUSTERED INDEX %s ON %s (%s)",
+		quoteMSSQLIdent(indexName), stagingTable, strings.Join(pkColList, ", "))
+	if _, err := p.db.ExecContext(ctx, indexSQL); err != nil {
+		// Non-fatal - continue without index (just slower)
+	}
+
+	// Build UPDATE and INSERT SQL templates
+	updateSQL, insertSQL := buildMSSQLUpsertSQL(schema, table, stagingTable, cols, pkCols)
+
+	// For small tables or degenerate PK ranges, execute single UPDATE + INSERT
+	if rowCount <= 50000 || minPK == maxPK {
+		if updateSQL != "" {
+			if _, err := p.db.ExecContext(ctx, updateSQL+" OPTION(MAXDOP 1)"); err != nil {
+				return fmt.Errorf("executing update: %w", err)
+			}
+		}
+		if _, err := p.db.ExecContext(ctx, insertSQL+" OPTION(MAXDOP 1)"); err != nil {
+			return fmt.Errorf("executing insert: %w", err)
+		}
+	} else {
+		// Chunked UPDATE + INSERT for large tables
+		// Use configured chunk size (default 5K if not specified)
+		chunkSize := int64(mergeChunkSize)
+		if chunkSize <= 0 {
+			chunkSize = 5000
+		}
+		chunksProcessed := 0
+		// CHECKPOINT every ~50K rows to release memory buffers
+		checkpointInterval := int(50000 / chunkSize)
+		if checkpointInterval < 1 {
+			checkpointInterval = 1
+		}
+
+		for start := minPK; start <= maxPK; start += chunkSize {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			end := start + chunkSize - 1
+			if end > maxPK {
+				end = maxPK
+			}
+
+			chunkedUpdate, chunkedInsert := buildMSSQLChunkedUpsertSQL(schema, table, stagingTable, cols, pkCols, pkCol, start, end)
+			if chunkedUpdate != "" {
+				if _, err := p.db.ExecContext(ctx, chunkedUpdate+" OPTION(MAXDOP 1)"); err != nil {
+					return fmt.Errorf("executing chunked update (pk %d-%d): %w", start, end, err)
+				}
+			}
+			if _, err := p.db.ExecContext(ctx, chunkedInsert+" OPTION(MAXDOP 1)"); err != nil {
+				return fmt.Errorf("executing chunked insert (pk %d-%d): %w", start, end, err)
+			}
+
+			chunksProcessed++
+			if chunksProcessed%checkpointInterval == 0 {
+				p.db.ExecContext(ctx, "CHECKPOINT")
+			}
+		}
+	}
+
+	// Drop staging table
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable)
+	p.db.ExecContext(ctx, dropSQL)
+
+	return nil
+}
+
+// buildMSSQLUpsertSQL generates separate UPDATE and INSERT statements
+// Returns (updateSQL, insertSQL)
+func buildMSSQLUpsertSQL(schema, table, stagingTable string, cols []string, pkCols []string) (string, string) {
+	targetTable := qualifyMSSQLTable(schema, table)
+
+	// Build PK join condition
+	pkJoins := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		pkJoins[i] = fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
+	}
+	pkJoinClause := strings.Join(pkJoins, " AND ")
+
+	// Build SET clause (exclude PK columns)
+	pkSet := make(map[string]bool)
+	for _, pk := range pkCols {
+		pkSet[pk] = true
+	}
+	var setClauses []string
+	for _, col := range cols {
+		if !pkSet[col] {
+			setClauses = append(setClauses, fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
+		}
+	}
+
+	// Build column lists for INSERT
+	quotedCols := make([]string, len(cols))
+	srcCols := make([]string, len(cols))
+	for i, col := range cols {
+		quotedCols[i] = quoteMSSQLIdent(col)
+		srcCols[i] = fmt.Sprintf("s.%s", quoteMSSQLIdent(col))
+	}
+
+	// UPDATE: Join staging to target on PK, update only changed non-PK columns
+	// Uses EXISTS(SELECT s.cols EXCEPT SELECT t.cols) for NULL-safe change detection
+	var updateSQL string
+	if len(setClauses) > 0 {
+		// Build column list for change detection (non-PK columns only)
+		var nonPKCols []string
+		for _, col := range cols {
+			if !pkSet[col] {
+				nonPKCols = append(nonPKCols, quoteMSSQLIdent(col))
+			}
+		}
+		sNonPKCols := make([]string, len(nonPKCols))
+		tNonPKCols := make([]string, len(nonPKCols))
+		for i, col := range nonPKCols {
+			sNonPKCols[i] = "s." + col
+			tNonPKCols[i] = "t." + col
+		}
+
+		updateSQL = fmt.Sprintf(`UPDATE t SET %s
+FROM %s t
+INNER JOIN %s s ON %s
+WHERE EXISTS (SELECT %s EXCEPT SELECT %s)`,
+			strings.Join(setClauses, ", "),
+			targetTable,
+			stagingTable,
+			pkJoinClause,
+			strings.Join(sNonPKCols, ", "),
+			strings.Join(tNonPKCols, ", "))
+	}
+
+	// INSERT: Insert rows from staging that don't exist in target
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s)
+SELECT %s
+FROM %s s
+WHERE NOT EXISTS (
+    SELECT 1 FROM %s t WHERE %s
+)`,
+		targetTable,
+		strings.Join(quotedCols, ", "),
+		strings.Join(srcCols, ", "),
+		stagingTable,
+		targetTable,
+		pkJoinClause)
+
+	return updateSQL, insertSQL
+}
+
+// buildMSSQLChunkedUpsertSQL generates UPDATE and INSERT statements for a PK range
+// Returns (updateSQL, insertSQL)
+func buildMSSQLChunkedUpsertSQL(schema, table, stagingTable string, cols []string, pkCols []string, pkCol string, startPK, endPK int64) (string, string) {
+	targetTable := qualifyMSSQLTable(schema, table)
+
+	// Build PK join condition
+	pkJoins := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		pkJoins[i] = fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
+	}
+	pkJoinClause := strings.Join(pkJoins, " AND ")
+
+	// Build SET clause (exclude PK columns)
+	pkSet := make(map[string]bool)
+	for _, pk := range pkCols {
+		pkSet[pk] = true
+	}
+	var setClauses []string
+	for _, col := range cols {
+		if !pkSet[col] {
+			setClauses = append(setClauses, fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
+		}
+	}
+
+	// Build column lists for INSERT
+	quotedCols := make([]string, len(cols))
+	srcCols := make([]string, len(cols))
+	for i, col := range cols {
+		quotedCols[i] = quoteMSSQLIdent(col)
+		srcCols[i] = fmt.Sprintf("s.%s", quoteMSSQLIdent(col))
+	}
+
+	// PK range filter
+	pkRangeFilter := fmt.Sprintf("s.%s BETWEEN %d AND %d", quoteMSSQLIdent(pkCol), startPK, endPK)
+
+	// UPDATE: Join staging to target on PK within range, only update changed rows
+	// Uses EXISTS(SELECT s.cols EXCEPT SELECT t.cols) for NULL-safe change detection
+	var updateSQL string
+	if len(setClauses) > 0 {
+		// Build column list for change detection (non-PK columns only)
+		var nonPKCols []string
+		for _, col := range cols {
+			if !pkSet[col] {
+				nonPKCols = append(nonPKCols, quoteMSSQLIdent(col))
+			}
+		}
+		sNonPKCols := make([]string, len(nonPKCols))
+		tNonPKCols := make([]string, len(nonPKCols))
+		for i, col := range nonPKCols {
+			sNonPKCols[i] = "s." + col
+			tNonPKCols[i] = "t." + col
+		}
+
+		updateSQL = fmt.Sprintf(`UPDATE t SET %s
+FROM %s t
+INNER JOIN %s s ON %s
+WHERE %s
+AND EXISTS (SELECT %s EXCEPT SELECT %s)`,
+			strings.Join(setClauses, ", "),
+			targetTable,
+			stagingTable,
+			pkJoinClause,
+			pkRangeFilter,
+			strings.Join(sNonPKCols, ", "),
+			strings.Join(tNonPKCols, ", "))
+	}
+
+	// INSERT: Insert rows from staging (within range) that don't exist in target
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s)
+SELECT %s
+FROM %s s
+WHERE %s
+AND NOT EXISTS (
+    SELECT 1 FROM %s t WHERE %s
+)`,
+		targetTable,
+		strings.Join(quotedCols, ", "),
+		strings.Join(srcCols, ", "),
+		stagingTable,
+		pkRangeFilter,
+		targetTable,
+		pkJoinClause)
+
+	return updateSQL, insertSQL
 }
 
 // GenerateMSSQLDDL generates SQL Server DDL from source table metadata
