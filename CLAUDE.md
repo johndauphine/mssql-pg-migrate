@@ -148,8 +148,34 @@ Incremental synchronization that preserves target-only data:
 - **SQL Server**: Uses staging table + `UPDATE`/`INSERT` with `EXCEPT` change detection
 - **No deletes**: Rows only in target are preserved
 - **Performance**: 2-5x slower than bulk copy due to index maintenance and conflict detection
+- **Auto-tuning**: `upsert_merge_chunk_size` scales with available memory (5K-20K rows)
 
 See `examples/config-upsert.yaml` for a complete example.
+
+## Performance Benchmarks
+
+### Test Environment
+- **Hardware**: MacBook Pro M3 Max, 36GB RAM, 14 cores
+- **Dataset**: Stack Overflow 2010 (19.3M rows, 9 tables)
+- **Databases**: PostgreSQL 15 and SQL Server 2022 (both in Docker)
+
+### Bulk Copy (drop_recreate mode)
+| Direction | Throughput | Notes |
+|-----------|------------|-------|
+| MSSQL → PostgreSQL | 575K+ rows/sec | COPY protocol |
+| PostgreSQL → MSSQL | 419K+ rows/sec | TDS bulk copy |
+
+### Upsert Mode (PG → MSSQL)
+| Scenario | Time | Throughput | Notes |
+|----------|------|------------|-------|
+| Initial load (empty target) | 6m26s | 50K rows/sec | All inserts via staging table |
+| Re-run (no changes) | 3m49s | 84K rows/sec | Change detection skips updates |
+| Re-run (1 row modified) | 3m40s | 88K rows/sec | Only modified row updated |
+
+**Key observations**:
+- Upsert initial load is ~8x slower than bulk copy due to staging table overhead
+- Subsequent syncs are faster because `EXCEPT`-based change detection skips unchanged rows
+- Memory-scaled chunk size (20K on 36GB) prevents SQL Server memory pressure
 
 ## Building
 
