@@ -18,12 +18,14 @@ type MSSQLPool struct {
 	db           *sql.DB
 	config       *config.TargetConfig
 	maxConns     int
-	rowsPerBatch int // Hint for bulk copy optimizer
-	compatLevel  int // Database compatibility level (e.g., 130 for SQL Server 2016)
+	rowsPerBatch int    // Hint for bulk copy optimizer
+	compatLevel  int    // Database compatibility level (e.g., 130 for SQL Server 2016)
+	sourceType   string // "mssql" or "postgres" - used for DDL generation
 }
 
 // NewMSSQLPool creates a new SQL Server target connection pool
-func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MSSQLPool, error) {
+// sourceType indicates the source database type ("mssql" or "postgres") for DDL generation
+func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int, sourceType string) (*MSSQLPool, error) {
 	trustCert := "false"
 	if cfg.TrustServerCert {
 		trustCert = "true"
@@ -65,6 +67,7 @@ func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MS
 		maxConns:     maxConns,
 		rowsPerBatch: rowsPerBatch,
 		compatLevel:  compatLevel,
+		sourceType:   sourceType,
 	}, nil
 }
 
@@ -115,7 +118,7 @@ func (p *MSSQLPool) CreateTable(ctx context.Context, t *source.Table, targetSche
 
 // CreateTableWithOptions creates a table (unlogged option ignored for MSSQL)
 func (p *MSSQLPool) CreateTableWithOptions(ctx context.Context, t *source.Table, targetSchema string, unlogged bool) error {
-	ddl := GenerateMSSQLDDL(t, targetSchema)
+	ddl := GenerateMSSQLDDL(t, targetSchema, p.sourceType)
 
 	_, err := p.db.ExecContext(ctx, ddl)
 	if err != nil {
@@ -700,8 +703,9 @@ AND NOT EXISTS (
 	return updateSQL, insertSQL
 }
 
-// GenerateMSSQLDDL generates SQL Server DDL from source table metadata
-func GenerateMSSQLDDL(t *source.Table, targetSchema string) string {
+// GenerateMSSQLDDL generates CREATE TABLE statement for SQL Server
+// sourceType indicates the source database type ("mssql" or "postgres") for type mapping
+func GenerateMSSQLDDL(t *source.Table, targetSchema string, sourceType string) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", qualifyMSSQLTable(targetSchema, t.Name)))
@@ -711,8 +715,8 @@ func GenerateMSSQLDDL(t *source.Table, targetSchema string) string {
 			sb.WriteString(",\n")
 		}
 
-		// Map data type
-		mssqlType := typemap.PostgresToMSSQL(col.DataType, col.MaxLength, col.Precision, col.Scale)
+		// Map data type using unified type mapping
+		mssqlType := typemap.MapType(sourceType, "mssql", col.DataType, col.MaxLength, col.Precision, col.Scale)
 
 		sb.WriteString(fmt.Sprintf("    %s %s", quoteMSSQLIdent(col.Name), mssqlType))
 
