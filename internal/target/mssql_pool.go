@@ -444,6 +444,7 @@ func (p *MSSQLPool) PrepareUpsertStaging(ctx context.Context, schema, table stri
 // mergeChunkSize controls the chunk size for UPDATE+INSERT operations (0 = use default 5000)
 func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string, mergeChunkSize int) error {
 	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+	targetTable := qualifyMSSQLTable(schema, table)
 
 	// Get row count and min/max PK from staging table
 	var rowCount int64
@@ -462,6 +463,20 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 		return nil
 	}
 
+	// Check if target table has identity columns (needed for same-engine MSSQL migrations)
+	var hasIdentity bool
+	identitySQL := fmt.Sprintf(`
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM sys.columns c
+			JOIN sys.tables t ON c.object_id = t.object_id
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = '%s' AND t.name = '%s' AND c.is_identity = 1
+		) THEN 1 ELSE 0 END`, schema, table)
+	if err := p.db.QueryRowContext(ctx, identitySQL).Scan(&hasIdentity); err != nil {
+		// Non-fatal - assume no identity and continue
+		hasIdentity = false
+	}
+
 	// Create index on staging table PK for efficient chunked operations
 	indexName := fmt.Sprintf("IX_staging_%s_pk", table)
 	var pkColList []string
@@ -477,6 +492,32 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 	// Build UPDATE and INSERT SQL templates
 	updateSQL, insertSQL := buildMSSQLUpsertSQL(schema, table, stagingTable, cols, pkCols)
 
+	// Helper to execute INSERT with IDENTITY_INSERT if needed
+	execInsert := func(sql string) error {
+		if hasIdentity {
+			// Must use same connection for SET IDENTITY_INSERT to work
+			conn, err := p.db.Conn(ctx)
+			if err != nil {
+				return fmt.Errorf("getting connection: %w", err)
+			}
+			defer conn.Close()
+
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s ON", targetTable)); err != nil {
+				return fmt.Errorf("enabling identity insert: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, sql+" OPTION(MAXDOP 1)"); err != nil {
+				conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable))
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable)); err != nil {
+				return fmt.Errorf("disabling identity insert: %w", err)
+			}
+			return nil
+		}
+		_, err := p.db.ExecContext(ctx, sql+" OPTION(MAXDOP 1)")
+		return err
+	}
+
 	// For small tables or degenerate PK ranges, execute single UPDATE + INSERT
 	if rowCount <= 50000 || minPK == maxPK {
 		if updateSQL != "" {
@@ -484,7 +525,7 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 				return fmt.Errorf("executing update: %w", err)
 			}
 		}
-		if _, err := p.db.ExecContext(ctx, insertSQL+" OPTION(MAXDOP 1)"); err != nil {
+		if err := execInsert(insertSQL); err != nil {
 			return fmt.Errorf("executing insert: %w", err)
 		}
 	} else {
@@ -520,7 +561,7 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 					return fmt.Errorf("executing chunked update (pk %d-%d): %w", start, end, err)
 				}
 			}
-			if _, err := p.db.ExecContext(ctx, chunkedInsert+" OPTION(MAXDOP 1)"); err != nil {
+			if err := execInsert(chunkedInsert); err != nil {
 				return fmt.Errorf("executing chunked insert (pk %d-%d): %w", start, end, err)
 			}
 
