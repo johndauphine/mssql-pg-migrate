@@ -463,16 +463,18 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 		return nil
 	}
 
-	// Check if target table has identity columns (needed for same-engine MSSQL migrations)
+	// Check if target table has identity columns. This is required whenever the target table
+	// uses identity/auto-increment columns (e.g., same-engine MSSQL or cross-engine migrations
+	// from sources with GENERATED AS IDENTITY).
 	var hasIdentity bool
-	identitySQL := fmt.Sprintf(`
+	identitySQL := `
 		SELECT CASE WHEN EXISTS (
 			SELECT 1 FROM sys.columns c
 			JOIN sys.tables t ON c.object_id = t.object_id
 			JOIN sys.schemas s ON t.schema_id = s.schema_id
-			WHERE s.name = '%s' AND t.name = '%s' AND c.is_identity = 1
-		) THEN 1 ELSE 0 END`, schema, table)
-	if err := p.db.QueryRowContext(ctx, identitySQL).Scan(&hasIdentity); err != nil {
+			WHERE s.name = @p1 AND t.name = @p2 AND c.is_identity = 1
+		) THEN 1 ELSE 0 END`
+	if err := p.db.QueryRowContext(ctx, identitySQL, schema, table).Scan(&hasIdentity); err != nil {
 		// Non-fatal - assume no identity and continue
 		hasIdentity = false
 	}
@@ -507,7 +509,7 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 			}
 			if _, err := conn.ExecContext(ctx, sql+" OPTION(MAXDOP 1)"); err != nil {
 				conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable))
-				return err
+				return fmt.Errorf("executing insert with identity: %w", err)
 			}
 			if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable)); err != nil {
 				return fmt.Errorf("disabling identity insert: %w", err)
