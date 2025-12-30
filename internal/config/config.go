@@ -364,7 +364,7 @@ func (c *Config) applyDefaults() {
 			c.Migration.WriteAheadWriters = writers
 		}
 	}
-	// Auto-tune parallel readers based on CPU cores and source type
+	// Auto-tune parallel readers based on CPU cores
 	// Conservative defaults to avoid overwhelming source database
 	if c.Migration.ParallelReaders == 0 {
 		cores := c.autoConfig.CPUCores
@@ -971,7 +971,7 @@ func (c *Config) DebugDump() string {
 	// WriteAheadWriters
 	var writersExpl string
 	if c.Target.Type == "mssql" {
-		writersExpl = "fixed 2 (mssql TABLOCK)"
+		writersExpl = "fixed 2 (MSSQL TABLOCK)"
 	} else {
 		writersExpl = fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
 	}

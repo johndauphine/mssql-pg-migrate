@@ -551,8 +551,8 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	cfg.applyDefaults()
 
 	// With 8 cores: readers=2, writers=2
-	// MSSQL connections: workers * readers + 4 = 4 * 2 + 4 = 12
-	// PG connections: workers * writers + 4 = 4 * 2 + 4 = 12
+	// Source connections: workers * readers + 4 = 4 * 2 + 4 = 12
+	// Target connections: workers * writers + 4 = 4 * 2 + 4 = 12
 	expectedMSSQLConns := cfg.Migration.Workers*cfg.Migration.ParallelReaders + 4
 	expectedPGConns := cfg.Migration.Workers*cfg.Migration.WriteAheadWriters + 4
 
