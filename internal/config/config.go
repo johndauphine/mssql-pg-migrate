@@ -315,19 +315,20 @@ func (c *Config) applyDefaults() {
 	if c.Migration.MaxPartitions == 0 {
 		c.Migration.MaxPartitions = c.Migration.Workers // Match workers
 	}
-	// Auto-tune chunk size and buffers based on available memory
-	// Target: use ~50% of available RAM for buffering
-	// Each worker buffers: read_ahead_buffers × chunk_size × ~500 bytes/row average
+	// Auto-tune chunk size based on available RAM
+	// Formula: 75K base + 25K per 8GB RAM, clamped to 50K-200K
+	// This matches the Rust implementation for consistent behavior
 	targetMemoryMB := c.autoConfig.TargetMemoryMB
 	if c.Migration.ChunkSize == 0 {
-		// Scale chunk size with available memory: 100K-500K range
-		c.Migration.ChunkSize = int(targetMemoryMB * 50) // ~50 rows per MB
-		if c.Migration.ChunkSize < 100000 {
-			c.Migration.ChunkSize = 100000
+		ramGB := float64(c.autoConfig.AvailableMemoryMB) / 1024.0
+		chunkSize := 75000 + int(ramGB*25000.0/8.0)
+		if chunkSize < 50000 {
+			chunkSize = 50000
 		}
-		if c.Migration.ChunkSize > 500000 {
-			c.Migration.ChunkSize = 500000
+		if chunkSize > 200000 {
+			chunkSize = 200000
 		}
+		c.Migration.ChunkSize = chunkSize
 	}
 	if c.Migration.LargeTableThreshold == 0 {
 		c.Migration.LargeTableThreshold = 5000000
@@ -815,7 +816,8 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  Workers: %s\n", formatAutoValue(c.Migration.Workers, ac.OriginalWorkers, workersExpl)))
 
 	// ChunkSize
-	chunkExpl := fmt.Sprintf("%d MB * 50 rows/MB", ac.TargetMemoryMB)
+	ramGB := float64(ac.AvailableMemoryMB) / 1024.0
+	chunkExpl := fmt.Sprintf("75K + %.1fGB*3.1K", ramGB)
 	b.WriteString(fmt.Sprintf("  ChunkSize: %s\n", formatAutoValue(c.Migration.ChunkSize, ac.OriginalChunkSize, chunkExpl)))
 
 	// ReadAheadBuffers
