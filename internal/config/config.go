@@ -332,8 +332,19 @@ func (c *Config) applyDefaults() {
 		}
 		c.Migration.ChunkSize = chunkSize
 	}
+	// Large table threshold: scale with RAM (matches Rust implementation)
+	// More RAM = can handle larger tables before partitioning
+	// Formula: (RAM_GB / 8) * 1M, clamped 1M-20M
 	if c.Migration.LargeTableThreshold == 0 {
-		c.Migration.LargeTableThreshold = 5000000
+		ramGB := float64(c.autoConfig.AvailableMemoryMB) / 1024.0
+		threshold := int64(ramGB/8.0) * 1000000
+		if threshold < 1000000 {
+			threshold = 1000000
+		}
+		if threshold > 20000000 {
+			threshold = 20000000
+		}
+		c.Migration.LargeTableThreshold = threshold
 	}
 	if c.Migration.DataDir == "" {
 		home, _ := os.UserHomeDir()
@@ -851,7 +862,8 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  ParallelReaders: %s\n", formatAutoValue(c.Migration.ParallelReaders, ac.OriginalParallelReaders, readersExpl)))
 
 	// LargeTableThreshold
-	b.WriteString(fmt.Sprintf("  LargeTableThreshold: %s\n", formatAutoValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, "default 5M")))
+	threshExpl := fmt.Sprintf("(%.1fGB/8)*1M clamped 1M-20M", ramGB)
+	b.WriteString(fmt.Sprintf("  LargeTableThreshold: %s\n", formatAutoValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, threshExpl)))
 
 	// MSSQLRowsPerBatch
 	batchExpl := "matches chunk_size"
