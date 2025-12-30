@@ -382,18 +382,18 @@ func (c *Config) applyDefaults() {
 	}
 	// MSSQLRowsPerBatch defaults to chunk_size (set after chunk_size is finalized)
 	// This is applied later since it depends on ChunkSize being set
+	// Read-ahead buffers: scale with RAM (matches Rust implementation)
+	// Formula: (RAM_GB / 4), clamped 4-32
 	if c.Migration.ReadAheadBuffers == 0 {
-		// Scale buffers: enough to keep writers fed, but within memory limits
-		// Formula: targetMemoryMB / workers / (chunkSize * 500 bytes avg)
-		bytesPerChunk := int64(c.Migration.ChunkSize) * 500 // ~500 bytes per row average
-		buffersPerWorker := (targetMemoryMB * 1024 * 1024) / int64(c.Migration.Workers) / bytesPerChunk
-		c.Migration.ReadAheadBuffers = int(buffersPerWorker)
-		if c.Migration.ReadAheadBuffers < 4 {
-			c.Migration.ReadAheadBuffers = 4
+		ramGB := float64(c.autoConfig.AvailableMemoryMB) / 1024.0
+		buffers := int(ramGB / 4.0)
+		if buffers < 4 {
+			buffers = 4
 		}
-		if c.Migration.ReadAheadBuffers > 32 {
-			c.Migration.ReadAheadBuffers = 32 // Cap to avoid excessive memory
+		if buffers > 32 {
+			buffers = 32
 		}
+		c.Migration.ReadAheadBuffers = buffers
 	}
 
 	// Calculate effective memory limit for Go GC soft limit
@@ -823,7 +823,7 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  ChunkSize: %s\n", formatAutoValue(c.Migration.ChunkSize, ac.OriginalChunkSize, chunkExpl)))
 
 	// ReadAheadBuffers
-	buffersExpl := fmt.Sprintf("memory/%d workers/chunk bytes", c.Migration.Workers)
+	buffersExpl := fmt.Sprintf("%.1fGB/4 clamped 4-32", ramGB)
 	b.WriteString(fmt.Sprintf("  ReadAheadBuffers: %s\n", formatAutoValue(c.Migration.ReadAheadBuffers, ac.OriginalReadAheadBuffers, buffersExpl)))
 
 	// MaxPartitions
