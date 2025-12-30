@@ -301,15 +301,17 @@ func (c *Config) applyDefaults() {
 	if c.Migration.MaxPgConnections == 0 {
 		c.Migration.MaxPgConnections = c.Migration.MaxConnections
 	}
-	// Auto-detect CPU cores for workers (leave 2 cores for OS/DB overhead)
+	// Auto-detect CPU cores for workers
+	// Formula: (cores - 2), clamped to 4-12 for optimal performance
+	// This aligns with Rust implementation for consistent behavior
 	if c.Migration.Workers == 0 {
 		cores := runtime.NumCPU()
 		c.Migration.Workers = cores - 2
-		if c.Migration.Workers < 2 {
-			c.Migration.Workers = 2
+		if c.Migration.Workers < 4 {
+			c.Migration.Workers = 4
 		}
-		if c.Migration.Workers > 32 {
-			c.Migration.Workers = 32 // Cap at 32 workers
+		if c.Migration.Workers > 12 {
+			c.Migration.Workers = 12 // Cap at 12 workers (diminishing returns beyond)
 		}
 	}
 	if c.Migration.MaxPartitions == 0 {
@@ -812,7 +814,7 @@ func (c *Config) DebugDump() string {
 	b.WriteString("\nMigration Settings:\n")
 
 	// Workers
-	workersExpl := fmt.Sprintf("%d cores - 2", ac.CPUCores)
+	workersExpl := fmt.Sprintf("(cores-2) clamped 4-12, %d cores", ac.CPUCores)
 	b.WriteString(fmt.Sprintf("  Workers: %s\n", formatAutoValue(c.Migration.Workers, ac.OriginalWorkers, workersExpl)))
 
 	// ChunkSize
