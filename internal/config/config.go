@@ -224,8 +224,10 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalSampleSize = c.Migration.SampleSize
 	c.autoConfig.OriginalUpsertMergeChunkSize = c.Migration.UpsertMergeChunkSize
 
-	// Detect system resources
-	c.autoConfig.CPUCores = runtime.NumCPU()
+	// Detect system resources (only if not already set, for testing)
+	if c.autoConfig.CPUCores == 0 {
+		c.autoConfig.CPUCores = runtime.NumCPU()
+	}
 	c.autoConfig.AvailableMemoryMB = getAvailableMemoryMB()
 
 	// Calculate target memory for auto-tuning (50% of limit)
