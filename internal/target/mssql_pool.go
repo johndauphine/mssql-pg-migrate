@@ -336,6 +336,7 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
+	defer tx.Rollback() // Safe to call after commit - returns ErrTxDone
 
 	// Use the direct bulk API via Raw() for better performance
 	// This bypasses database/sql prepared statement overhead
@@ -381,7 +382,6 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 	})
 
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("bulk copy: %w", err)
 	}
 
