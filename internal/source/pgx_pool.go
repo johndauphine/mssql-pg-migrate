@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver for database/sql
@@ -27,7 +28,7 @@ func NewPgxSourcePool(cfg *config.SourceConfig, maxConns int) (*PgxSourcePool, e
 		Scheme: "postgres",
 		User:   url.UserPassword(cfg.User, cfg.Password),
 		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Path:   cfg.Database,
+		Path:   "/" + cfg.Database,
 	}
 	q := u.Query()
 	q.Set("sslmode", cfg.SSLMode)
@@ -56,15 +57,15 @@ func NewPgxSourcePool(cfg *config.SourceConfig, maxConns int) (*PgxSourcePool, e
 	}
 
 	// Create sql.DB wrapper for compatibility
-	// We use the stdlib wrapper from pgx for this
-	sqlDB := poolConfig.ConnConfig.ConnString()
-	db, err := sql.Open("pgx", sqlDB)
+	// Use the same connection string for both pools to ensure consistency
+	db, err := sql.Open("pgx", u.String())
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("creating sql.DB wrapper: %w", err)
 	}
 	db.SetMaxOpenConns(maxConns)
 	db.SetMaxIdleConns(maxConns / 4)
+	db.SetConnMaxLifetime(30 * time.Minute)
 
 	logging.Info("Connected to PostgreSQL source (pgx): %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
 
@@ -78,8 +79,13 @@ func NewPgxSourcePool(cfg *config.SourceConfig, maxConns int) (*PgxSourcePool, e
 
 // Close closes all connections in the pool
 func (p *PgxSourcePool) Close() error {
-	p.pool.Close()
-	return p.sqlDB.Close()
+	if p.pool != nil {
+		p.pool.Close()
+	}
+	if p.sqlDB != nil {
+		return p.sqlDB.Close()
+	}
+	return nil
 }
 
 // DB returns the underlying sql.DB for compatibility
