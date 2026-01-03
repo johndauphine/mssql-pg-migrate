@@ -2159,7 +2159,7 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 	for _, t := range tables {
 		rowCount, err := o.sourcePool.GetRowCount(ctx, o.config.Source.Schema, t.Name)
 		if err != nil {
-			logging.Warn(fmt.Sprintf("Failed to get row count for %s.%s: %v (assuming 0)", o.config.Source.Schema, t.Name, err))
+			logging.Warn("Failed to get row count for %s.%s: %v (assuming 0)", o.config.Source.Schema, t.Name, err)
 			rowCount = 0
 		}
 		result.TotalRows += rowCount
