@@ -18,6 +18,7 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
 	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -72,7 +73,7 @@ func main() {
 			},
 			&cli.DurationFlag{
 				Name:  "progress-interval",
-				Value: 5 * time.Second,
+				Value: 1 * time.Second,
 				Usage: "Interval between progress updates",
 			},
 		},
@@ -893,28 +894,61 @@ func runCLIWizard(advanced bool) (*config.Config, error) {
 		return result == "y" || result == "yes"
 	}
 
+	promptPassword := func(label string) string {
+		fmt.Printf("%s: ", label)
+		password, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println() // newline after hidden input
+		if err != nil {
+			return ""
+		}
+		return string(password)
+	}
+
+	promptChoice := func(label string, choices []string, defaultValue string) string {
+		for {
+			result := prompt(label, defaultValue)
+			for _, choice := range choices {
+				if result == choice {
+					return result
+				}
+			}
+			fmt.Printf("  Invalid choice. Options: %s\n", strings.Join(choices, ", "))
+		}
+	}
+
 	cfg := &config.Config{}
 
+	dbTypes := []string{"mssql", "postgres"}
+	targetModes := []string{"drop_recreate", "truncate", "upsert"}
+
 	fmt.Println("\n=== Source Database ===")
-	cfg.Source.Type = prompt("Database type (mssql/postgres)", "mssql")
+	cfg.Source.Type = promptChoice("Database type (mssql/postgres)", dbTypes, "mssql")
 	cfg.Source.Host = prompt("Host", "localhost")
-	cfg.Source.Port = promptInt("Port", 1433)
+	defaultPort := 1433
+	if cfg.Source.Type == "postgres" {
+		defaultPort = 5432
+	}
+	cfg.Source.Port = promptInt("Port", defaultPort)
 	cfg.Source.Database = prompt("Database name", "")
 	cfg.Source.User = prompt("Username", "sa")
-	cfg.Source.Password = prompt("Password", "")
+	cfg.Source.Password = promptPassword("Password")
 	cfg.Source.Schema = prompt("Schema", "dbo")
 
 	fmt.Println("\n=== Target Database ===")
-	cfg.Target.Type = prompt("Database type (mssql/postgres)", "postgres")
+	cfg.Target.Type = promptChoice("Database type (mssql/postgres)", dbTypes, "postgres")
 	cfg.Target.Host = prompt("Host", "localhost")
-	cfg.Target.Port = promptInt("Port", 5432)
+	defaultPort = 5432
+	if cfg.Target.Type == "mssql" {
+		defaultPort = 1433
+	}
+	cfg.Target.Port = promptInt("Port", defaultPort)
 	cfg.Target.Database = prompt("Database name", "")
 	cfg.Target.User = prompt("Username", "postgres")
-	cfg.Target.Password = prompt("Password", "")
+	cfg.Target.Password = promptPassword("Password")
 	cfg.Target.Schema = prompt("Schema", "public")
 
 	fmt.Println("\n=== Migration Settings ===")
-	cfg.Migration.TargetMode = prompt("Target mode (drop_recreate/truncate/upsert)", "drop_recreate")
+	cfg.Migration.TargetMode = promptChoice("Target mode (drop_recreate/truncate/upsert)", targetModes, "drop_recreate")
 	cfg.Migration.CreateIndexes = promptBool("Create indexes", false)
 	cfg.Migration.CreateForeignKeys = promptBool("Create foreign keys", false)
 
