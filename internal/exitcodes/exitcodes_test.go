@@ -21,6 +21,7 @@ func TestFromError(t *testing.T) {
 		{"login failed", errors.New("login failed for user"), ConnectionError},
 		{"transfer error", errors.New("bulk copy failed"), TransferError},
 		{"row count mismatch", errors.New("row count mismatch: expected 100, got 99"), ValidationError},
+		{"row count validation failed", errors.New("row count validation failed"), ValidationError},
 		{"no primary key", errors.New("table has no primary key for upsert"), ValidationError},
 		{"context canceled", errors.New("context canceled"), Cancelled},
 		{"state error", errors.New("checkpoint not found"), StateError},

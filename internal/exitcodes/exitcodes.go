@@ -87,15 +87,28 @@ func FromError(err error) int {
 		return IOError
 	}
 
-	// Config errors (exit code 1) - parsing/validation issues, not file access
+	// Validation errors (exit code 4) - check before ConfigError to avoid
+	// "row count validation failed" matching ConfigError's "validation" keyword
+	if containsAny(errStr, []string{
+		"row count",
+		"mismatch",
+		"primary key",
+		"no pk",
+		"upsert requires",
+		"validation failed",
+	}) {
+		return ValidationError
+	}
+
+	// Config errors (exit code 1) - parsing issues, not validation of data
 	if containsAny(errStr, []string{
 		"yaml:",
 		"json:",
 		"unmarshal",
 		"invalid configuration",
 		"missing required",
-		"validation failed",
 		"invalid value",
+		"parsing config",
 	}) && !containsAny(errStr, []string{"connection", "connect", "dial"}) {
 		return ConfigError
 	}
@@ -130,18 +143,6 @@ func FromError(err error) int {
 		"truncate",
 	}) {
 		return TransferError
-	}
-
-	// Validation errors (exit code 4)
-	if containsAny(errStr, []string{
-		"validation",
-		"row count",
-		"mismatch",
-		"primary key",
-		"no pk",
-		"upsert requires",
-	}) {
-		return ValidationError
 	}
 
 	// Cancelled (exit code 5)
