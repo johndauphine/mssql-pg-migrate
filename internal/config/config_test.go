@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -563,5 +565,243 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	if cfg.Migration.MaxPgConnections < expectedPGConns {
 		t.Errorf("insufficient PG connections: got %d, need at least %d",
 			cfg.Migration.MaxPgConnections, expectedPGConns)
+	}
+}
+
+func TestExpandTemplateValue(t *testing.T) {
+	// Create a temp file with a secret
+	tmpDir := t.TempDir()
+	secretFile := filepath.Join(tmpDir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("  my-secret-password  \n"), 0600); err != nil {
+		t.Fatalf("failed to create secret file: %v", err)
+	}
+
+	// Set an env var for testing
+	os.Setenv("TEST_SECRET_VAR", "env-secret-value")
+	defer os.Unsetenv("TEST_SECRET_VAR")
+
+	tests := []struct {
+		name      string
+		input     string
+		expected  string
+		expectErr bool
+	}{
+		{
+			name:     "cleartext password",
+			input:    "my-plain-password",
+			expected: "my-plain-password",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "file template",
+			input:    "${file:" + secretFile + "}",
+			expected: "my-secret-password", // Whitespace trimmed
+		},
+		{
+			name:     "env template",
+			input:    "${env:TEST_SECRET_VAR}",
+			expected: "env-secret-value",
+		},
+		{
+			name:     "env template missing var",
+			input:    "${env:NONEXISTENT_VAR_12345}",
+			expected: "", // Empty, no error
+		},
+		{
+			name:      "file template missing file",
+			input:     "${file:/nonexistent/path/to/secret}",
+			expectErr: true,
+		},
+		{
+			name:     "not a template - dollar sign without braces",
+			input:    "$file:/path",
+			expected: "$file:/path",
+		},
+		{
+			name:     "not a template - partial pattern",
+			input:    "${file:}",
+			expected: "${file:}", // Empty path, treated as literal
+		},
+		{
+			name:     "legacy env var syntax expands",
+			input:    "${TEST_SECRET_VAR}",
+			expected: "env-secret-value", // Legacy ${VAR} expands like ${env:VAR}
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := expandTemplateValue(tt.input)
+
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestLoadBytesWithSecretTemplates(t *testing.T) {
+	// Create temp files with secrets
+	tmpDir := t.TempDir()
+	mssqlPwdFile := filepath.Join(tmpDir, "mssql_password")
+	pgPwdFile := filepath.Join(tmpDir, "pg_password")
+
+	if err := os.WriteFile(mssqlPwdFile, []byte("mssql-secret-123"), 0600); err != nil {
+		t.Fatalf("failed to create mssql password file: %v", err)
+	}
+	if err := os.WriteFile(pgPwdFile, []byte("pg-secret-456"), 0600); err != nil {
+		t.Fatalf("failed to create pg password file: %v", err)
+	}
+
+	// Set env var for testing
+	os.Setenv("TEST_PG_PASSWORD", "env-pg-password")
+	defer os.Unsetenv("TEST_PG_PASSWORD")
+
+	tests := []struct {
+		name           string
+		yaml           string
+		expectedSource string
+		expectedTarget string
+		expectErr      bool
+	}{
+		{
+			name: "file-based secrets",
+			yaml: `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: ${file:` + mssqlPwdFile + `}
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: ${file:` + pgPwdFile + `}
+`,
+			expectedSource: "mssql-secret-123",
+			expectedTarget: "pg-secret-456",
+		},
+		{
+			name: "env-based secrets",
+			yaml: `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: cleartext-source
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: ${env:TEST_PG_PASSWORD}
+`,
+			expectedSource: "cleartext-source",
+			expectedTarget: "env-pg-password",
+		},
+		{
+			name: "mixed - cleartext and file",
+			yaml: `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: plain-password
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: ${file:` + pgPwdFile + `}
+`,
+			expectedSource: "plain-password",
+			expectedTarget: "pg-secret-456",
+		},
+		{
+			name: "missing file should error",
+			yaml: `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: ${file:/nonexistent/secret}
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: test
+`,
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadBytes([]byte(tt.yaml))
+
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			if cfg.Source.Password != tt.expectedSource {
+				t.Errorf("source password: expected %q, got %q", tt.expectedSource, cfg.Source.Password)
+			}
+			if cfg.Target.Password != tt.expectedTarget {
+				t.Errorf("target password: expected %q, got %q", tt.expectedTarget, cfg.Target.Password)
+			}
+		})
+	}
+}
+
+func TestExpandSecretsWithTilde(t *testing.T) {
+	// Create a secret file in temp dir and use tilde expansion
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot get home directory")
+	}
+
+	// Create a temp secret in a known location
+	tmpDir := t.TempDir()
+	secretFile := filepath.Join(tmpDir, "test-secret")
+	if err := os.WriteFile(secretFile, []byte("tilde-secret"), 0600); err != nil {
+		t.Fatalf("failed to create secret file: %v", err)
+	}
+
+	// Test that tilde expansion works in file paths
+	// We can't easily test ~ directly, but we can test the expandTilde function
+	result := expandTilde("~/some/path")
+	expected := filepath.Join(home, "some/path")
+	if result != expected {
+		t.Errorf("expandTilde: expected %q, got %q", expected, result)
 	}
 }
