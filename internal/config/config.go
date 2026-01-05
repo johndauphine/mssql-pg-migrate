@@ -28,8 +28,12 @@ func expandTilde(path string) string {
 	return path
 }
 
-// templatePattern matches ${file:/path}, ${env:VAR_NAME}, or ${VAR_NAME} (legacy) patterns
-var templatePattern = regexp.MustCompile(`^\$\{(file|env):(.+)\}$`)
+// Template patterns for secret expansion:
+// - filePattern: ${file:/path/to/file} - any path characters allowed
+// - envPattern: ${env:VAR_NAME} - valid env var names only [A-Za-z_][A-Za-z0-9_]*
+// - legacyEnvPattern: ${VAR_NAME} - legacy shorthand for ${env:VAR_NAME}
+var filePattern = regexp.MustCompile(`^\$\{file:(.+)\}$`)
+var envPattern = regexp.MustCompile(`^\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$`)
 var legacyEnvPattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // expandTemplateValue expands template patterns in a string value.
@@ -45,37 +49,29 @@ func expandTemplateValue(value string) (string, error) {
 		return value, nil
 	}
 
-	// Check for ${file:...} or ${env:...} pattern
-	matches := templatePattern.FindStringSubmatch(value)
-	if matches != nil {
-		templateType := matches[1]
-		templateArg := matches[2]
-
-		switch templateType {
-		case "file":
-			// Expand ~ in file paths
-			filePath := expandTilde(templateArg)
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return "", fmt.Errorf("reading secret from file %s: %w", filePath, err)
-			}
-			return strings.TrimSpace(string(data)), nil
-
-		case "env":
-			envValue := os.Getenv(templateArg)
-			if envValue == "" {
-				// Return empty string, don't error - env var might be optional
-				return "", nil
-			}
-			return envValue, nil
+	// Check for ${file:...} pattern
+	if matches := filePattern.FindStringSubmatch(value); matches != nil {
+		filePath := expandTilde(matches[1])
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("reading secret from file %s: %w", filePath, err)
 		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	// Check for ${env:VAR_NAME} pattern (explicit, restricted to valid env var names)
+	if matches := envPattern.FindStringSubmatch(value); matches != nil {
+		// Return empty string if env var not set - allows optional env vars
+		// but may cause silent auth failures if variable name is misspelled.
+		return os.Getenv(matches[1]), nil
 	}
 
 	// Check for legacy ${VAR_NAME} pattern (shorthand for ${env:VAR_NAME})
-	legacyMatches := legacyEnvPattern.FindStringSubmatch(value)
-	if legacyMatches != nil {
-		varName := legacyMatches[1]
-		return os.Getenv(varName), nil
+	if matches := legacyEnvPattern.FindStringSubmatch(value); matches != nil {
+		// Return empty string if env var not set - matches ${env:VAR} behavior.
+		// This allows optional env vars but may cause silent auth failures
+		// if the variable name is misspelled. Use explicit ${env:VAR} for clarity.
+		return os.Getenv(matches[1]), nil
 	}
 
 	// Not a template pattern - return as-is (cleartext)
@@ -230,23 +226,33 @@ func LoadWithOptions(path string, opts LoadOptions) (*Config, error) {
 // expandYAMLTemplates expands ${file:path} and ${env:VAR} templates in YAML string.
 // Also supports legacy ${VAR} syntax for backward compatibility.
 // This runs before YAML parsing to allow templates in any field.
+//
+// Security note: File paths are not restricted - users should only use trusted paths
+// like /run/secrets/ for Docker secrets. Avoid user-controlled paths.
 func expandYAMLTemplates(yamlStr string) (string, error) {
 	// Pattern to match ${file:path}, ${env:VAR}, or ${VAR} in YAML
-	// We need to be careful not to break YAML structure
-	pattern := regexp.MustCompile(`\$\{(file|env):([^}]+)\}|\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	// - file: allows any path characters (user responsibility to use safe paths)
+	// - env: restricted to valid env var names [A-Za-z_][A-Za-z0-9_]*
+	// - legacy ${VAR}: also restricted to valid env var names
+	pattern := regexp.MustCompile(`\$\{file:([^}]+)\}|\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}|\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-	var lastErr error
+	var firstErr error
 	result := pattern.ReplaceAllStringFunc(yamlStr, func(match string) string {
+		// If we've already encountered an error, leave subsequent matches unchanged
+		if firstErr != nil {
+			return match
+		}
+
 		expanded, err := expandTemplateValue(match)
 		if err != nil {
-			lastErr = err
+			firstErr = err
 			return match // Keep original on error
 		}
 		return expanded
 	})
 
-	if lastErr != nil {
-		return "", lastErr
+	if firstErr != nil {
+		return "", firstErr
 	}
 	return result, nil
 }

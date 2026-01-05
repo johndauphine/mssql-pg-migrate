@@ -805,3 +805,111 @@ func TestExpandSecretsWithTilde(t *testing.T) {
 		t.Errorf("expandTilde: expected %q, got %q", expected, result)
 	}
 }
+
+func TestSecretsWithSpecialCharacters(t *testing.T) {
+	// Test that secrets containing YAML special characters work correctly
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name           string
+		secretContent  string
+		expectedSource string
+	}{
+		{
+			name:           "password with colon",
+			secretContent:  "pass:word",
+			expectedSource: "pass:word",
+		},
+		{
+			name:           "password with quotes",
+			secretContent:  `pass"word'test`,
+			expectedSource: `pass"word'test`,
+		},
+		{
+			name:           "password with special chars",
+			secretContent:  "p@ss#w0rd!$%^&*()",
+			expectedSource: "p@ss#w0rd!$%^&*()",
+		},
+		{
+			name:           "password with spaces",
+			secretContent:  "pass word with spaces",
+			expectedSource: "pass word with spaces",
+		},
+		{
+			name:           "password with newline gets trimmed",
+			secretContent:  "password\n",
+			expectedSource: "password",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create secret file
+			secretFile := filepath.Join(tmpDir, "secret-"+tt.name)
+			if err := os.WriteFile(secretFile, []byte(tt.secretContent), 0600); err != nil {
+				t.Fatalf("failed to create secret file: %v", err)
+			}
+
+			// Test via LoadBytes - password field is quoted in YAML so special chars are safe
+			yaml := `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: ${file:` + secretFile + `}
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: cleartext
+`
+			cfg, err := LoadBytes([]byte(yaml))
+			if err != nil {
+				t.Fatalf("LoadBytes failed: %v", err)
+			}
+
+			if cfg.Source.Password != tt.expectedSource {
+				t.Errorf("expected password %q, got %q", tt.expectedSource, cfg.Source.Password)
+			}
+		})
+	}
+}
+
+func TestInvalidEnvVarNames(t *testing.T) {
+	// Test that invalid env var names are treated as literals (not expanded)
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "env var starting with number",
+			input:    "${env:1INVALID}",
+			expected: "${env:1INVALID}", // Not a valid env var name, treated as literal
+		},
+		{
+			name:     "env var with hyphen",
+			input:    "${env:INVALID-VAR}",
+			expected: "${env:INVALID-VAR}", // Hyphen not allowed, treated as literal
+		},
+		{
+			name:     "legacy var starting with number",
+			input:    "${1INVALID}",
+			expected: "${1INVALID}", // Not a valid env var name
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := expandTemplateValue(tt.input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
