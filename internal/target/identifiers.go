@@ -100,14 +100,16 @@ func CollectPGIdentifierChanges(tables []TableInfo) *IdentifierChangeReport {
 		tableName := t.GetName()
 		sanitizedTableName := SanitizePGIdentifier(tableName)
 
-		tableChanges := TableIdentifierChanges{}
+		// Always populate TableName so logging can display the correct table name
+		tableChanges := TableIdentifierChanges{
+			TableName: IdentifierChange{
+				Original:  tableName,
+				Sanitized: sanitizedTableName,
+			},
+		}
 
 		// Check table name change
 		if tableName != sanitizedTableName {
-			tableChanges.TableName = IdentifierChange{
-				Original:  tableName,
-				Sanitized: sanitizedTableName,
-			}
 			tableChanges.HasTableChange = true
 			report.TotalTableChanges++
 		}
