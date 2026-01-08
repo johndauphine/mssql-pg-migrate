@@ -439,6 +439,40 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 		return fmt.Errorf("creating staging table: %w", err)
 	}
 
+	// 2b. Get actual column names from staging table (to handle case mismatches)
+	// When source is PostgreSQL (lowercase) and target is MSSQL (mixed case),
+	// we need to use the target's column names for bulk insert.
+	actualCols, err := p.getStagingTableColumns(ctx, conn, stagingTable)
+	if err != nil {
+		return fmt.Errorf("getting staging table columns: %w", err)
+	}
+
+	// Build case-insensitive mapping from input cols to actual cols
+	colMapping := make(map[string]string, len(actualCols))
+	for _, ac := range actualCols {
+		colMapping[strings.ToLower(ac)] = ac
+	}
+
+	// Map input column names to actual staging column names
+	mappedCols := make([]string, len(cols))
+	for i, c := range cols {
+		if actual, ok := colMapping[strings.ToLower(c)]; ok {
+			mappedCols[i] = actual
+		} else {
+			mappedCols[i] = c // fallback to original if not found
+		}
+	}
+
+	// Map PK column names as well
+	mappedPKCols := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		if actual, ok := colMapping[strings.ToLower(pk)]; ok {
+			mappedPKCols[i] = actual
+		} else {
+			mappedPKCols[i] = pk // fallback to original if not found
+		}
+	}
+
 	// 3. Check for identity columns (need IDENTITY_INSERT for merge)
 	var hasIdentity bool
 	identitySQL := `
@@ -453,12 +487,12 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 	}
 
 	// 4. Bulk insert into temp staging table using TDS bulk copy
-	if err := p.bulkInsertToTempTable(ctx, conn, stagingTable, cols, rows); err != nil {
+	if err := p.bulkInsertToTempTable(ctx, conn, stagingTable, mappedCols, rows); err != nil {
 		return fmt.Errorf("bulk insert to staging: %w", err)
 	}
 
 	// 5. Build and execute MERGE with deadlock retry
-	mergeSQL := buildMSSQLMergeWithTablock(targetTable, stagingTable, cols, pkCols)
+	mergeSQL := buildMSSQLMergeWithTablock(targetTable, stagingTable, mappedCols, mappedPKCols)
 	if err := p.executeMergeWithRetry(ctx, conn, targetTable, mergeSQL, hasIdentity, 5); err != nil {
 		return fmt.Errorf("merge failed: %w", err)
 	}
@@ -483,6 +517,44 @@ func safeMSSQLStagingName(table string, writerID int, partitionID *int) string {
 		base = fmt.Sprintf("#stg_%x", hash[:8]) // 16 hex chars
 	}
 	return base + suffix
+}
+
+// getStagingTableColumns retrieves the column names from a #temp staging table.
+// This is needed to handle case mismatches between source (e.g., PG lowercase)
+// and target (e.g., MSSQL mixed case) column names.
+func (p *MSSQLPool) getStagingTableColumns(ctx context.Context, conn *sql.Conn, stagingTable string) ([]string, error) {
+	// Use OBJECT_ID which correctly handles session-scoped temp tables
+	// OBJECT_ID('tempdb..#tablename') returns the correct object_id for the current session's temp table
+	query := `
+		SELECT c.name
+		FROM tempdb.sys.columns c
+		WHERE c.object_id = OBJECT_ID('tempdb..' + @p1)
+		ORDER BY c.column_id`
+
+	rows, err := conn.QueryContext(ctx, query, stagingTable)
+	if err != nil {
+		return nil, fmt.Errorf("querying staging table columns: %w", err)
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var colName string
+		if err := rows.Scan(&colName); err != nil {
+			return nil, fmt.Errorf("scanning column name: %w", err)
+		}
+		cols = append(cols, colName)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating columns: %w", err)
+	}
+
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("no columns found for staging table %s", stagingTable)
+	}
+
+	return cols, nil
 }
 
 // bulkInsertToTempTable performs TDS bulk insert into a #temp table
