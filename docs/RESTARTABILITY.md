@@ -45,7 +45,7 @@ internal/config/
 ```yaml
 migration:
   checkpoint_frequency: 10    # Save progress every N chunks (default: 10)
-  max_retries: 3              # Retry failed tables N times (default: 3)
+  max_retries: 3              # Retry failed tables N times after the first attempt (default: 3)
   history_retention_days: 30  # Keep run history for N days (default: 30)
 ```
 
@@ -72,7 +72,7 @@ if job.Saver != nil && job.TaskID > 0 && chunkCount%checkpointFreq == 0 && lastP
 
 Controls automatic retry for transient errors.
 
-- **Default**: 3 retries
+- **Default**: 3 retries (total attempts = 4)
 - **Backoff**: Exponential (1s, 2s, 4s, 8s...)
 - **Retryable errors**: Connection reset, deadlock, timeout, broken pipe, etc.
 - **Location**: `internal/orchestrator/orchestrator.go` lines 86-113 (isRetryableError) and 1025-1053 (retry loop)
