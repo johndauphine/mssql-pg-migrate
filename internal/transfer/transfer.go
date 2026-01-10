@@ -29,12 +29,19 @@ type ProgressSaver interface {
 	GetProgress(taskID int64) (lastPK any, rowsDone int64, err error)
 }
 
+// DateFilter specifies a date-based filter for incremental sync
+type DateFilter struct {
+	Column    string    // Date column name
+	Timestamp time.Time // Only sync rows where column > timestamp (or is NULL)
+}
+
 // Job represents a data transfer job
 type Job struct {
-	Table     source.Table
-	Partition *source.Partition
-	TaskID    int64         // For chunk-level resume
-	Saver     ProgressSaver // For saving progress (nil to disable)
+	Table      source.Table
+	Partition  *source.Partition
+	TaskID     int64         // For chunk-level resume
+	Saver      ProgressSaver // For saving progress (nil to disable)
+	DateFilter *DateFilter   // Optional date filter for incremental sync (upsert mode)
 }
 
 // chunkResult holds a chunk of data for the read-ahead pipeline
@@ -215,39 +222,53 @@ func (s dbSyntax) tableHint(strictConsistency bool) string {
 }
 
 // buildKeysetQuery builds a keyset pagination query for the given database type
-func (s dbSyntax) buildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool) string {
+// If dateFilter is provided, adds a date filter clause for incremental sync
+func (s dbSyntax) buildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool, dateFilter *DateFilter) string {
 	if s.dbType == "postgres" {
+		dateClause := ""
+		if dateFilter != nil {
+			// Include rows where date > lastSync OR date IS NULL (catch rows without timestamps)
+			dateClause = fmt.Sprintf(" AND (%s > $4 OR %s IS NULL)", s.quoteIdent(dateFilter.Column), s.quoteIdent(dateFilter.Column))
+			if !hasMaxPK {
+				dateClause = fmt.Sprintf(" AND (%s > $3 OR %s IS NULL)", s.quoteIdent(dateFilter.Column), s.quoteIdent(dateFilter.Column))
+			}
+		}
 		if hasMaxPK {
 			return fmt.Sprintf(`
 				SELECT %s FROM %s
-				WHERE %s > $1 AND %s <= $2
+				WHERE %s > $1 AND %s <= $2%s
 				ORDER BY %s
 				LIMIT $3
-			`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), s.quoteIdent(pkCol), s.quoteIdent(pkCol))
+			`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), s.quoteIdent(pkCol), dateClause, s.quoteIdent(pkCol))
 		}
 		return fmt.Sprintf(`
 			SELECT %s FROM %s
-			WHERE %s > $1
+			WHERE %s > $1%s
 			ORDER BY %s
 			LIMIT $2
-		`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), s.quoteIdent(pkCol))
+		`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), dateClause, s.quoteIdent(pkCol))
 	}
 
 	// SQL Server syntax
+	dateClause := ""
+	if dateFilter != nil {
+		// Include rows where date > lastSync OR date IS NULL (catch rows without timestamps)
+		dateClause = fmt.Sprintf(" AND ([%s] > @lastSyncDate OR [%s] IS NULL)", dateFilter.Column, dateFilter.Column)
+	}
 	if hasMaxPK {
 		return fmt.Sprintf(`
 			SELECT TOP (@limit) %s
 			FROM %s %s
-			WHERE [%s] > @lastPK AND [%s] <= @maxPK
+			WHERE [%s] > @lastPK AND [%s] <= @maxPK%s
 			ORDER BY [%s]
-		`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, pkCol, pkCol)
+		`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, pkCol, dateClause, pkCol)
 	}
 	return fmt.Sprintf(`
 		SELECT TOP (@limit) %s
 		FROM %s %s
-		WHERE [%s] > @lastPK
+		WHERE [%s] > @lastPK%s
 		ORDER BY [%s]
-	`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, pkCol)
+	`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, dateClause, pkCol)
 }
 
 // buildRowNumberQuery builds a ROW_NUMBER pagination query for the given database type
@@ -277,26 +298,40 @@ func (s dbSyntax) buildRowNumberQuery(cols, orderBy, schema, table, tableHint st
 }
 
 // buildArgs builds query arguments for the given database type
-func (s dbSyntax) buildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool) []any {
+func (s dbSyntax) buildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, dateFilter *DateFilter) []any {
 	if s.dbType == "postgres" {
 		if hasMaxPK {
+			if dateFilter != nil {
+				return []any{lastPK, maxPK, limit, dateFilter.Timestamp}
+			}
 			return []any{lastPK, maxPK, limit}
+		}
+		if dateFilter != nil {
+			return []any{lastPK, limit, dateFilter.Timestamp}
 		}
 		return []any{lastPK, limit}
 	}
 
 	// SQL Server uses named parameters
 	if hasMaxPK {
-		return []any{
+		args := []any{
 			sql.Named("limit", limit),
 			sql.Named("lastPK", lastPK),
 			sql.Named("maxPK", maxPK),
 		}
+		if dateFilter != nil {
+			args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
+		}
+		return args
 	}
-	return []any{
+	args := []any{
 		sql.Named("limit", limit),
 		sql.Named("lastPK", lastPK),
 	}
+	if dateFilter != nil {
+		args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
+	}
+	return args
 }
 
 // buildRowNumberArgs builds query arguments for ROW_NUMBER pagination
@@ -643,8 +678,8 @@ func executeKeysetPagination(
 				}
 
 				// Always use bounded query for parallel readers
-				query := syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true)
-				args := syntax.buildKeysetArgs(lastPK, rangeMaxPK, chunkSize, true)
+				query := syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true, job.DateFilter)
+				args := syntax.buildKeysetArgs(lastPK, rangeMaxPK, chunkSize, true, job.DateFilter)
 
 				// Time the query
 				queryStart := time.Now()

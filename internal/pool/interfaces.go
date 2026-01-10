@@ -27,6 +27,11 @@ type SourcePool interface {
 	// Row count (for validation)
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)
 
+	// Date-based incremental sync
+	// GetDateColumnInfo checks if any of the candidate columns exist as a temporal type
+	// Returns the first matching column name, its data type, and whether a match was found
+	GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool)
+
 	// Pool info
 	MaxConns() int
 	DBType() string // "mssql" or "postgres"

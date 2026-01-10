@@ -1,5 +1,7 @@
 package checkpoint
 
+import "time"
+
 // StateBackend defines the interface for state persistence.
 // Implementations include SQLite (full featured) and file-based (minimal, for Airflow).
 type StateBackend interface {
@@ -27,6 +29,10 @@ type StateBackend interface {
 	// History (optional - file backend may return empty)
 	GetAllRuns() ([]Run, error)
 	GetRunByID(runID string) (*Run, error)
+
+	// Date-based incremental sync (optional - file backend returns nil/no-op)
+	GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error)
+	UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error
 
 	// Lifecycle
 	Close() error

@@ -477,6 +477,95 @@ func TestAutoTuneParallelReaders(t *testing.T) {
 	}
 }
 
+func TestDateUpdatedColumnsConfig(t *testing.T) {
+	configYAML := `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: target
+  schema: public
+  user: user
+  password: pass
+migration:
+  target_mode: upsert
+  date_updated_columns:
+    - ModifiedDate
+    - UpdatedAt
+    - LastUpdated
+`
+	// Create temp config file
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configYAML), 0600); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	// Verify DateUpdatedColumns parsed correctly
+	expected := []string{"ModifiedDate", "UpdatedAt", "LastUpdated"}
+	if len(cfg.Migration.DateUpdatedColumns) != len(expected) {
+		t.Fatalf("DateUpdatedColumns length mismatch: got %d, want %d",
+			len(cfg.Migration.DateUpdatedColumns), len(expected))
+	}
+
+	for i, col := range expected {
+		if cfg.Migration.DateUpdatedColumns[i] != col {
+			t.Errorf("DateUpdatedColumns[%d] mismatch: got %s, want %s",
+				i, cfg.Migration.DateUpdatedColumns[i], col)
+		}
+	}
+}
+
+func TestDateUpdatedColumnsEmptyConfig(t *testing.T) {
+	configYAML := `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: target
+  schema: public
+  user: user
+  password: pass
+migration:
+  target_mode: upsert
+`
+	// Create temp config file
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configYAML), 0600); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	// DateUpdatedColumns should be empty when not configured
+	if len(cfg.Migration.DateUpdatedColumns) != 0 {
+		t.Errorf("Expected empty DateUpdatedColumns, got %v", cfg.Migration.DateUpdatedColumns)
+	}
+}
+
 func TestAutoTuneUserOverride(t *testing.T) {
 	// User-specified values should not be overridden by auto-tuning
 	cfg := &Config{

@@ -92,3 +92,74 @@ func countRows(t *testing.T, db *sql.DB, query string, args ...any) int {
 	}
 	return count
 }
+
+func TestSyncTimestamps(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	sourceSchema := "dbo"
+	tableName := "Orders"
+	targetSchema := "public"
+
+	// Test: Get timestamp for table with no prior sync
+	ts, err := state.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp() error: %v", err)
+	}
+	if ts != nil {
+		t.Errorf("Expected nil timestamp for first sync, got %v", ts)
+	}
+
+	// Test: Update sync timestamp
+	syncTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	if err := state.UpdateSyncTimestamp(sourceSchema, tableName, targetSchema, syncTime); err != nil {
+		t.Fatalf("UpdateSyncTimestamp() error: %v", err)
+	}
+
+	// Test: Get updated timestamp
+	ts, err = state.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp() error: %v", err)
+	}
+	if ts == nil {
+		t.Fatal("Expected non-nil timestamp after update")
+	}
+	if !ts.Equal(syncTime) {
+		t.Errorf("Timestamp mismatch: got %v, want %v", ts, syncTime)
+	}
+
+	// Test: Update with newer timestamp (upsert)
+	newerTime := time.Date(2024, 6, 16, 12, 0, 0, 0, time.UTC)
+	if err := state.UpdateSyncTimestamp(sourceSchema, tableName, targetSchema, newerTime); err != nil {
+		t.Fatalf("UpdateSyncTimestamp() error: %v", err)
+	}
+
+	ts, err = state.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp() error: %v", err)
+	}
+	if !ts.Equal(newerTime) {
+		t.Errorf("Timestamp not updated: got %v, want %v", ts, newerTime)
+	}
+
+	// Test: Different table should have no timestamp
+	ts, err = state.GetLastSyncTimestamp(sourceSchema, "OtherTable", targetSchema)
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp() error: %v", err)
+	}
+	if ts != nil {
+		t.Errorf("Expected nil timestamp for different table, got %v", ts)
+	}
+
+	// Test: Same table, different target schema should have no timestamp
+	ts, err = state.GetLastSyncTimestamp(sourceSchema, tableName, "other_schema")
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp() error: %v", err)
+	}
+	if ts != nil {
+		t.Errorf("Expected nil timestamp for different target schema, got %v", ts)
+	}
+}

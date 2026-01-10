@@ -708,6 +708,14 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Create progress saver for chunk-level resume
 	progressSaver := checkpoint.NewProgressSaver(o.state)
 
+	// Check if date-based incremental sync is enabled (upsert mode + DateUpdatedColumns configured)
+	dateIncrementalEnabled := o.config.Migration.TargetMode == "upsert" &&
+		len(o.config.Migration.DateUpdatedColumns) > 0
+
+	// Map to track date filters per table (for updating sync timestamp after success)
+	tableDateFilters := make(map[string]*transfer.DateFilter)
+	tableSyncStartTimes := make(map[string]time.Time)
+
 	// Track jobs per table for completion tracking
 	tableJobs := make(map[string]int) // tableName -> number of jobs
 
@@ -732,6 +740,45 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	for _, t := range tables {
 		logging.Debug("Processing table %s (rows=%d, large=%v)", t.Name, t.RowCount, t.IsLarge(o.config.Migration.LargeTableThreshold))
+
+		// Determine date filter for this table (if incremental sync is enabled)
+		var dateFilter *transfer.DateFilter
+		if dateIncrementalEnabled {
+			colName, colType, found := o.sourcePool.GetDateColumnInfo(
+				ctx, t.Schema, t.Name, o.config.Migration.DateUpdatedColumns)
+			if found {
+				t.DateColumn = colName
+				t.DateColumnType = colType
+
+				// Record sync start time (capture before transfer starts)
+				syncStartTime := time.Now().UTC()
+				tableSyncStartTimes[t.Name] = syncStartTime
+
+				// Get last sync timestamp
+				lastSync, err := o.state.GetLastSyncTimestamp(t.Schema, t.Name, o.config.Target.Schema)
+				if err != nil {
+					logging.Warn("Failed to get last sync timestamp for %s: %v", t.Name, err)
+				}
+
+				if lastSync != nil {
+					dateFilter = &transfer.DateFilter{
+						Column:    colName,
+						Timestamp: *lastSync,
+					}
+					tableDateFilters[t.Name] = dateFilter
+					logging.Info("Table %s: incremental sync from %v using %s (%s)",
+						t.Name, lastSync.Format(time.RFC3339), colName, colType)
+				} else {
+					// First sync - no date filter, but we'll record the sync timestamp
+					tableDateFilters[t.Name] = nil // nil means first sync
+					logging.Info("Table %s: first sync (full load), date column %s found", t.Name, colName)
+				}
+			} else {
+				logging.Debug("Table %s: no date column found in %v, using full sync",
+					t.Name, o.config.Migration.DateUpdatedColumns)
+			}
+		}
+
 		if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
 			// Partition large tables with keyset pagination (PK-based boundaries)
 			numPartitions := min(
@@ -754,10 +801,11 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				taskID, _ := o.state.CreateTask(runID, "transfer", taskKey)
 
 				jobs = append(jobs, transfer.Job{
-					Table:     t,
-					Partition: &p,
-					TaskID:    taskID,
-					Saver:     progressSaver,
+					Table:      t,
+					Partition:  &p,
+					TaskID:     taskID,
+					Saver:      progressSaver,
+					DateFilter: dateFilter,
 				})
 			}
 		} else if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasPK() {
@@ -793,10 +841,11 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				taskID, _ := o.state.CreateTask(runID, "transfer", taskKey)
 
 				jobs = append(jobs, transfer.Job{
-					Table:     t,
-					Partition: &p,
-					TaskID:    taskID,
-					Saver:     progressSaver,
+					Table:      t,
+					Partition:  &p,
+					TaskID:     taskID,
+					Saver:      progressSaver,
+					DateFilter: dateFilter,
 				})
 			}
 		} else {
@@ -806,10 +855,11 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			taskID, _ := o.state.CreateTask(runID, "transfer", taskKey)
 
 			jobs = append(jobs, transfer.Job{
-				Table:     t,
-				Partition: nil,
-				TaskID:    taskID,
-				Saver:     progressSaver,
+				Table:      t,
+				Partition:  nil,
+				TaskID:     taskID,
+				Saver:      progressSaver,
+				DateFilter: dateFilter,
 			})
 		}
 	}
@@ -970,6 +1020,17 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				taskKey := fmt.Sprintf("transfer:%s.%s", j.Table.Schema, j.Table.Name)
 				o.markTableComplete(runID, taskKey)
 				o.progress.TableComplete()
+
+				// Update sync timestamp for date-based incremental sync
+				if _, hasDateFilter := tableDateFilters[j.Table.Name]; hasDateFilter {
+					if syncTime, ok := tableSyncStartTimes[j.Table.Name]; ok {
+						if err := o.state.UpdateSyncTimestamp(j.Table.Schema, j.Table.Name, o.config.Target.Schema, syncTime); err != nil {
+							logging.Warn("Failed to update sync timestamp for %s: %v", j.Table.Name, err)
+						} else {
+							logging.Debug("Updated sync timestamp for %s to %v", j.Table.Name, syncTime.Format(time.RFC3339))
+						}
+					}
+				}
 			}
 			ts.mu.Unlock()
 		}(job)

@@ -14,6 +14,9 @@ type Table struct {
 	Indexes          []Index           `json:"indexes"`
 	ForeignKeys      []ForeignKey      `json:"foreign_keys"`
 	CheckConstraints []CheckConstraint `json:"check_constraints"`
+	// Date-based incremental sync support
+	DateColumn     string `json:"date_column,omitempty"`      // Valid date column name (if found)
+	DateColumnType string `json:"date_column_type,omitempty"` // SQL data type of date column
 }
 
 // FullName returns schema.table format

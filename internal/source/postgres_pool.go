@@ -383,6 +383,43 @@ func (p *PostgresPool) LoadCheckConstraints(ctx context.Context, t *Table) error
 	return nil
 }
 
+// GetDateColumnInfo checks if any of the candidate columns exist as a temporal type
+// Returns the first matching column name, its data type, and whether a match was found
+func (p *PostgresPool) GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool) {
+	if len(candidates) == 0 {
+		return "", "", false
+	}
+
+	// Valid PostgreSQL temporal types for date-based incremental sync
+	validTypes := map[string]bool{
+		"timestamp":   true,
+		"timestamptz": true,
+		"date":        true,
+		// Internal type names (udt_name)
+		"timestamp without time zone": true,
+		"timestamp with time zone":    true,
+	}
+
+	// Check each candidate in order
+	for _, candidate := range candidates {
+		query := `
+			SELECT udt_name
+			FROM information_schema.columns
+			WHERE table_schema = $1
+			  AND table_name = $2
+			  AND column_name = $3
+		`
+		var dt string
+		err := p.db.QueryRowContext(ctx, query, schema, table, candidate).Scan(&dt)
+
+		if err == nil && validTypes[strings.ToLower(dt)] {
+			return candidate, dt, true
+		}
+	}
+
+	return "", "", false
+}
+
 // splitCSV splits a comma-separated string into a slice (duplicated from pool.go for independence)
 func splitCSVPG(s string) []string {
 	if s == "" {

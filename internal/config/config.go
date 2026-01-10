@@ -200,6 +200,8 @@ type MigrationConfig struct {
 	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
+	// Date-based incremental sync (upsert mode only)
+	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -967,6 +969,10 @@ func (c *Config) DebugDump() string {
 	if c.Migration.TargetMode == "upsert" {
 		upsertExpl := "auto: memory-scaled 5K-20K"
 		b.WriteString(fmt.Sprintf("  UpsertMergeChunkSize: %s\n", formatAutoValue(c.Migration.UpsertMergeChunkSize, ac.OriginalUpsertMergeChunkSize, upsertExpl)))
+		// DateUpdatedColumns - only show in upsert mode if configured
+		if len(c.Migration.DateUpdatedColumns) > 0 {
+			b.WriteString(fmt.Sprintf("  DateUpdatedColumns: %v\n", c.Migration.DateUpdatedColumns))
+		}
 	}
 	b.WriteString(fmt.Sprintf("  StrictConsistency: %v\n", c.Migration.StrictConsistency))
 	b.WriteString(fmt.Sprintf("  CreateIndexes: %v\n", c.Migration.CreateIndexes))

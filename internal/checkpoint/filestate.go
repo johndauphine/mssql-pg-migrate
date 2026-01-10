@@ -415,6 +415,17 @@ func (fs *FileState) GetRunByID(runID string) (*Run, error) {
 	return nil, nil
 }
 
+// GetLastSyncTimestamp is a no-op for file state (doesn't persist sync timestamps).
+// Date-based incremental sync falls back to full sync when using file state backend.
+func (fs *FileState) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error) {
+	return nil, nil
+}
+
+// UpdateSyncTimestamp is a no-op for file state.
+func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error {
+	return nil
+}
+
 // Close is a no-op for file state.
 func (fs *FileState) Close() error {
 	return nil

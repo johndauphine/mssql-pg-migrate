@@ -408,6 +408,45 @@ func (p *Pool) LoadCheckConstraints(ctx context.Context, t *Table) error {
 	return nil
 }
 
+// GetDateColumnInfo checks if any of the candidate columns exist as a temporal type
+// Returns the first matching column name, its data type, and whether a match was found
+func (p *Pool) GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool) {
+	if len(candidates) == 0 {
+		return "", "", false
+	}
+
+	// Valid SQL Server temporal types for date-based incremental sync
+	validTypes := map[string]bool{
+		"datetime":       true,
+		"datetime2":      true,
+		"smalldatetime":  true,
+		"date":           true,
+		"datetimeoffset": true,
+	}
+
+	// Check each candidate in order
+	for _, candidate := range candidates {
+		query := `
+			SELECT DATA_TYPE
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = @schema
+			  AND TABLE_NAME = @table
+			  AND COLUMN_NAME = @column
+		`
+		var dt string
+		err := p.db.QueryRowContext(ctx, query,
+			sql.Named("schema", schema),
+			sql.Named("table", table),
+			sql.Named("column", candidate)).Scan(&dt)
+
+		if err == nil && validTypes[strings.ToLower(dt)] {
+			return candidate, dt, true
+		}
+	}
+
+	return "", "", false
+}
+
 // splitCSV splits a comma-separated string into a slice
 func splitCSV(s string) []string {
 	if s == "" {
