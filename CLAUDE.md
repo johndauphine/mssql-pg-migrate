@@ -256,6 +256,34 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 11: Security & Correctness Fixes (Claude - January 11, 2026)
+1. Ran Gemini CLI code review on codebase - identified security vulnerabilities
+2. Fixed DSN injection vulnerabilities (PR #46):
+   - Added `url.QueryEscape()` for user, password, database in connection strings
+   - Fixed in `source/pool.go`, `source/postgres_pool.go`, `target/mssql_pool.go`
+   - Prevents credential injection via special characters
+3. Fixed SQL injection in `tableColumns()` (checkpoint/state.go):
+   - SQLite PRAGMA doesn't support parameterized queries
+   - Added whitelist validation for allowed table names (runs, tasks, profiles, table_sync_timestamps)
+4. Improved `isASCIINumeric()` robustness:
+   - Rewrote to properly validate numeric format
+   - Validates sign placement, single decimal point, scientific notation
+   - Prevents false positives like ".", "+-1", "1.2.3"
+5. Fixed spatial column detection for same-engine migrations:
+   - Previous refactor only detected spatial columns for cross-engine (PG→MSSQL)
+   - MSSQL→MSSQL with geography columns would fail change detection
+   - Now always detects spatial columns via `getSpatialColumns()`
+   - Only alters columns to nvarchar(max) for cross-engine
+6. Added `SpatialColumn` struct to track column type (geography vs geometry):
+   - Ensures correct STGeomFromText prefix (`geography::` vs `geometry::`)
+   - Updated `buildMSSQLMergeWithTablock()` signature to accept `[]SpatialColumn`
+7. Senior-data-engineer agent review: Grade A-
+8. Pre-commit test runner validated all 8 migration paths:
+   - All passed: MSSQL↔PG, PG↔PG, MSSQL↔MSSQL × drop_recreate/upsert
+   - 5.6M rows transferred, 389K rows/sec average
+   - Geography columns working in all scenarios
+9. Released v1.42.0
+
 ### Session 10: PG→MSSQL Geography Staging Table Fix (Claude - January 11, 2026)
 1. Fixed PG→MSSQL upsert failing for tables with geography columns (PR #45):
    - Previous fix (PR #43) only worked when `colTypes` contained target types
