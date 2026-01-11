@@ -85,11 +85,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
+8cc66a9 fix: convert WKT text to geography for PG→MSSQL upsert
 0b7ece2 docs: remove geography limitation from README
 30f43a7 fix: exclude geography/geometry from MERGE change detection
 6f8e905 feat: add helpful warning for geography/geometry upsert failures
 8f79202 fix: preserve binary data in MSSQL bulk copy conversion
-8d49c79 fix: handle decimal columns in MSSQL to MSSQL bulk copy
 ```
 
 ### Major Features
@@ -253,6 +253,22 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 8: PG→MSSQL Geography Upsert Fix (Claude - January 11, 2026)
+1. Fixed PG→MSSQL upsert for tables with geography/geometry columns (PR #43):
+   - PostgreSQL sends spatial data as WKT text (e.g., `POINT (-108.55 39.04)`)
+   - SQL Server bulk insert expected binary geography data, causing error:
+     `invalid type for Binary column: string POINT (-108.5523153 39.0430375)`
+   - Solution: Alter staging table spatial columns to `nvarchar(max)` for WKT text
+   - In MERGE, convert WKT back using `geography::STGeomFromText(source.col, 4326)`
+   - SRID 4326 is WGS84 (standard GPS coordinates)
+2. Updated `buildMSSQLMergeWithTablock` to accept `isCrossEngine` parameter:
+   - Detects cross-engine via `sourceType == "postgres"`
+   - Only applies WKT conversion for PG→MSSQL, not MSSQL→MSSQL
+3. Added unit tests for cross-engine geography/geometry conversion
+4. Test results with WideWorldImporters PG→MSSQL upsert:
+   - 9/9 tables pass including Customers with geography column
+   - 701K rows at 388K rows/sec
 
 ### Session 7: MSSQL to MSSQL Fixes & Geography Support (Claude - January 11, 2026)
 1. Fixed MSSQL→MSSQL decimal column bulk copy (PR #39):
