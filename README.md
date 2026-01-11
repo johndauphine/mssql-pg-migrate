@@ -27,16 +27,27 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 
 ## Security Notice
 
+### v1.42.0 Security Fixes
+
+**v1.42.0** addresses security vulnerabilities identified during code review:
+
+- **DSN Injection Fix**: Connection strings now properly URL-encode credentials to prevent injection via special characters in usernames, passwords, or database names
+- **SQL Injection Fix**: Internal SQLite queries now use whitelist validation for table names
+
+**Upgrade recommended** for all users to ensure secure credential handling.
+
+### Credential Storage (v1.10.0+)
+
 **Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.mssql-pg-migrate/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
 
 **Recommended actions:**
-1. **Upgrade to v1.10.0 or later** - The tool now automatically sanitizes any stored credentials on startup
+1. **Upgrade to v1.42.0 or later** - Includes all security fixes and credential sanitization
 2. **Rotate your database passwords** if you used earlier versions with sensitive credentials
 3. **Delete the state database** if you want to ensure all traces are removed: `rm ~/.mssql-pg-migrate/migrate.db`
 
 Starting with v1.10.0, credentials are always redacted before being stored.
 
-## Incremental Sync (New in v1.40.0)
+## Incremental Sync (New in v1.42.0)
 
 For large databases with frequent updates, use **date-based incremental loading** to dramatically reduce sync times. Instead of transferring all rows every time, only rows modified since the last sync are transferred.
 
@@ -375,7 +386,7 @@ sensor = PythonSensor(
 | PostgreSQL | PostgreSQL | COPY protocol |
 | SQL Server | SQL Server | TDS bulk copy |
 
-### Same-Engine Migrations (New in v1.40.0)
+### Same-Engine Migrations (New in v1.42.0)
 
 Same-engine migrations (PG→PG, MSSQL→MSSQL) are now supported with all target modes:
 
@@ -435,21 +446,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/mssql-pg-migrate
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-linux-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.40.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-linux-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.42.0-linux-amd64.tar.gz
 chmod +x mssql-pg-migrate-linux-amd64
 ./mssql-pg-migrate-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-darwin-arm64.tar.gz
-tar -xzf mssql-pg-migrate-v1.40.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-darwin-arm64.tar.gz
+tar -xzf mssql-pg-migrate-v1.42.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-darwin-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.40.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-darwin-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.42.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
 tar -xzf mssql-pg-migrate.tar.gz
 ```
 
@@ -1176,7 +1187,7 @@ All migration directions with both target modes:
 | **MSSQL → PG** | 400-432K rows/sec | 261-272K rows/sec |
 | **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
 
-*Note: MSSQL source performance improved significantly in v1.40.0 with 32KB TDS packet size (default).*
+*Note: MSSQL source performance improved significantly in v1.42.0 with 32KB TDS packet size (default).*
 
 ### Key Observations
 
