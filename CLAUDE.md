@@ -81,15 +81,15 @@ examples/                   # Example configuration files
 - **Password**: Traditional user/password (default)
 - **Kerberos**: Enterprise SSO via krb5 (MSSQL) or GSSAPI (PostgreSQL)
 
-## Current State (December 2025)
+## Current State (January 2026)
 
 ### Latest Commits
 ```
-21147b2 Improve TUI UX and profile metadata handling
-1122042 Add profile metadata and description display
-6ecc69a Add encrypted SQLite profiles and record run origin
-9aaacd9 Support custom configuration files in TUI and fix PG partition query
-5275226 Update AI context file with TUI implementation details
+02604ab docs: add incremental sync workflow to README
+6b413de chore: bump version to 1.31.0
+547f922 Merge pull request #36 - feat: require existing tables for upsert mode
+b1a4fb7 feat: add date-based incremental loading for upsert mode
+60ae853 refactor: remove deprecated staging table upsert code
 ```
 
 ### Major Features
@@ -142,12 +142,21 @@ Key fields:
 
 ### Upsert Mode
 Incremental synchronization that preserves target-only data:
-- **Requirements**: All tables must have primary keys
+- **Requirements**: All tables must have primary keys; target tables must already exist
+- **Workflow**: Run `drop_recreate` first for initial load, then `upsert` for incremental syncs
 - **PostgreSQL**: Uses batched `INSERT...ON CONFLICT DO UPDATE` with `IS DISTINCT FROM` change detection
 - **SQL Server**: Uses staging table + `UPDATE`/`INSERT` with `EXCEPT` change detection
 - **No deletes**: Rows only in target are preserved
 - **Performance**: 2-5x slower than bulk copy due to index maintenance and conflict detection
 - **Auto-tuning**: `upsert_merge_chunk_size` scales with available memory (5K-20K rows)
+
+### Date-Based Incremental Loading (v1.31.0+)
+For fast delta transfers using highwater marks:
+- **Configuration**: `date_updated_columns` lists column names to check (e.g., `UpdatedAt`, `ModifiedDate`)
+- **Highwater marks**: Stored in `table_sync_timestamps` table in state database
+- **First run**: Full load, records sync timestamp per table
+- **Subsequent runs**: Only fetches rows where `date_column > last_sync_timestamp`
+- **Performance**: Reduces sync time from minutes to seconds when data hasn't changed
 
 See `examples/config-upsert.yaml` for a complete example.
 
@@ -244,6 +253,18 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 5: Incremental Sync & Upsert Improvements (Claude - January 10, 2026)
+1. Ran full benchmark suite with SO2010 dataset (downloaded via aria2, restored to Docker containers)
+2. Tested all 4 migration directions: MSSQL→PG, PG→MSSQL, PG→PG, MSSQL→MSSQL
+3. Tested upsert mode with `date_updated_columns` for incremental loading
+4. Modified upsert mode to require existing tables (fail if missing)
+5. Improved validation to collect all errors (missing tables, missing PKs) before failing
+6. Updated `examples/config-upsert.yaml` with workflow documentation
+7. Created PR #36, addressed Copilot review feedback, merged to main
+8. Released v1.31.0 with incremental sync as headline feature
+9. Updated README with new "Incremental Sync" section and workflow guide
+10. Built and uploaded binaries for Linux, macOS (Intel/ARM), Windows
 
 ### Session 4: Same-Engine Migrations (Claude - December 23, 2025)
 1. Implemented PG→PG and MSSQL→MSSQL migrations with source-type aware DDL generation
