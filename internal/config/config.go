@@ -140,7 +140,8 @@ type SourceConfig struct {
 	Schema          string `yaml:"schema"`
 	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
-	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
+	Encrypt         *bool  `yaml:"encrypt"`           // MSSQL: enable TLS encryption (default: true)
+	PacketSize      int    `yaml:"packet_size"`       // MSSQL: TDS packet size in bytes (default: 16384, max: 32767)
 	// Kerberos authentication (alternative to user/password)
 	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
 	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)
@@ -161,7 +162,8 @@ type TargetConfig struct {
 	Schema          string `yaml:"schema"`
 	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
-	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
+	Encrypt         *bool  `yaml:"encrypt"`           // MSSQL: enable TLS encryption (default: true)
+	PacketSize      int    `yaml:"packet_size"`       // MSSQL: TDS packet size in bytes (default: 16384, max: 32767)
 	// Kerberos authentication (alternative to user/password)
 	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
 	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)
@@ -355,8 +357,12 @@ func (c *Config) applyDefaults() {
 	if c.Source.SSLMode == "" {
 		c.Source.SSLMode = "require" // Secure default for PostgreSQL
 	}
-	if c.Source.Encrypt == "" {
-		c.Source.Encrypt = "true" // Secure default for MSSQL
+	if c.Source.Encrypt == nil {
+		defaultEncrypt := true // Secure default for MSSQL
+		c.Source.Encrypt = &defaultEncrypt
+	}
+	if c.Source.PacketSize == 0 {
+		c.Source.PacketSize = 16384 // 16KB - larger than default 4KB for better throughput
 	}
 
 	// Target defaults
@@ -381,8 +387,12 @@ func (c *Config) applyDefaults() {
 	if c.Target.SSLMode == "" {
 		c.Target.SSLMode = "require" // Secure default for PostgreSQL
 	}
-	if c.Target.Encrypt == "" {
-		c.Target.Encrypt = "true" // Secure default for MSSQL
+	if c.Target.Encrypt == nil {
+		defaultEncrypt := true // Secure default for MSSQL
+		c.Target.Encrypt = &defaultEncrypt
+	}
+	if c.Target.PacketSize == 0 {
+		c.Target.PacketSize = 16384 // 16KB - larger than default 4KB for better throughput
 	}
 
 	// Handle backwards compatibility: if max_connections is set but new options aren't
@@ -652,16 +662,16 @@ func (c *Config) SourceDSN() string {
 	}
 	// Default: MSSQL
 	return c.buildMSSQLDSN(c.Source.Host, c.Source.Port, c.Source.Database,
-		c.Source.User, c.Source.Password, c.Source.Encrypt, c.Source.TrustServerCert,
-		c.Source.Auth, c.Source.Krb5Conf, c.Source.Keytab, c.Source.Realm, c.Source.SPN)
+		c.Source.User, c.Source.Password, *c.Source.Encrypt, c.Source.TrustServerCert,
+		c.Source.PacketSize, c.Source.Auth, c.Source.Krb5Conf, c.Source.Keytab, c.Source.Realm, c.Source.SPN)
 }
 
 // TargetDSN returns the target database connection string
 func (c *Config) TargetDSN() string {
 	if c.Target.Type == "mssql" {
 		return c.buildMSSQLDSN(c.Target.Host, c.Target.Port, c.Target.Database,
-			c.Target.User, c.Target.Password, c.Target.Encrypt, c.Target.TrustServerCert,
-			c.Target.Auth, c.Target.Krb5Conf, c.Target.Keytab, c.Target.Realm, c.Target.SPN)
+			c.Target.User, c.Target.Password, *c.Target.Encrypt, c.Target.TrustServerCert,
+			c.Target.PacketSize, c.Target.Auth, c.Target.Krb5Conf, c.Target.Keytab, c.Target.Realm, c.Target.SPN)
 	}
 	// Default: PostgreSQL
 	return c.buildPostgresDSN(c.Target.Host, c.Target.Port, c.Target.Database,
@@ -670,9 +680,13 @@ func (c *Config) TargetDSN() string {
 }
 
 // buildMSSQLDSN builds an MSSQL connection string with optional Kerberos auth
-func (c *Config) buildMSSQLDSN(host string, port int, database, user, password, encrypt string,
-	trustServerCert bool, auth, krb5Conf, keytab, realm, spn string) string {
+func (c *Config) buildMSSQLDSN(host string, port int, database, user, password string, encrypt bool,
+	trustServerCert bool, packetSize int, auth, krb5Conf, keytab, realm, spn string) string {
 
+	encryptStr := "false"
+	if encrypt {
+		encryptStr = "true"
+	}
 	trustCert := "false"
 	if trustServerCert {
 		trustCert = "true"
@@ -687,7 +701,12 @@ func (c *Config) buildMSSQLDSN(host string, port int, database, user, password, 
 	// Kerberos authentication
 	if auth == "kerberos" {
 		dsn := fmt.Sprintf("sqlserver://%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s&authenticator=krb5",
-			host, port, encodedDB, encrypt, trustCert)
+			host, port, encodedDB, encryptStr, trustCert)
+
+		// Add packet size for better throughput (default 4KB is too small)
+		if packetSize > 0 {
+			dsn += fmt.Sprintf("&packet+size=%d", packetSize)
+		}
 
 		// Optional Kerberos parameters
 		if krb5Conf != "" {
@@ -710,8 +729,15 @@ func (c *Config) buildMSSQLDSN(host string, port int, database, user, password, 
 	}
 
 	// Password authentication (default)
-	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		encodedUser, encodedPass, host, port, encodedDB, encrypt, trustCert)
+	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
+		encodedUser, encodedPass, host, port, encodedDB, encryptStr, trustCert)
+
+	// Add packet size for better throughput (default 4KB is too small)
+	if packetSize > 0 {
+		dsn += fmt.Sprintf("&packet+size=%d", packetSize)
+	}
+
+	return dsn
 }
 
 // buildPostgresDSN builds a PostgreSQL connection string with optional Kerberos auth
@@ -868,8 +894,9 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  User: %s\n", c.Source.User))
 	b.WriteString("  Password: [REDACTED]\n")
 	if c.Source.Type == "mssql" {
-		b.WriteString(fmt.Sprintf("  Encrypt: %s\n", c.Source.Encrypt))
+		b.WriteString(fmt.Sprintf("  Encrypt: %v\n", *c.Source.Encrypt))
 		b.WriteString(fmt.Sprintf("  TrustServerCert: %v\n", c.Source.TrustServerCert))
+		b.WriteString(fmt.Sprintf("  PacketSize: %d\n", c.Source.PacketSize))
 	} else {
 		b.WriteString(fmt.Sprintf("  SSLMode: %s\n", c.Source.SSLMode))
 	}
@@ -896,8 +923,9 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  User: %s\n", c.Target.User))
 	b.WriteString("  Password: [REDACTED]\n")
 	if c.Target.Type == "mssql" {
-		b.WriteString(fmt.Sprintf("  Encrypt: %s\n", c.Target.Encrypt))
+		b.WriteString(fmt.Sprintf("  Encrypt: %v\n", *c.Target.Encrypt))
 		b.WriteString(fmt.Sprintf("  TrustServerCert: %v\n", c.Target.TrustServerCert))
+		b.WriteString(fmt.Sprintf("  PacketSize: %d\n", c.Target.PacketSize))
 	} else {
 		b.WriteString(fmt.Sprintf("  SSLMode: %s\n", c.Target.SSLMode))
 	}

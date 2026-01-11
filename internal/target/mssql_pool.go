@@ -28,12 +28,21 @@ type MSSQLPool struct {
 // NewMSSQLPool creates a new SQL Server target connection pool
 // sourceType indicates the source database type ("mssql" or "postgres") for DDL generation
 func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int, sourceType string) (*MSSQLPool, error) {
+	encryptStr := "false"
+	if cfg.Encrypt != nil && *cfg.Encrypt {
+		encryptStr = "true"
+	}
 	trustCert := "false"
 	if cfg.TrustServerCert {
 		trustCert = "true"
 	}
 	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.Encrypt, trustCert)
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, encryptStr, trustCert)
+
+	// Add packet size for better throughput (default 4KB is too small)
+	if cfg.PacketSize > 0 {
+		dsn += fmt.Sprintf("&packet+size=%d", cfg.PacketSize)
+	}
 
 	db, err := sql.Open("sqlserver", dsn)
 	if err != nil {
