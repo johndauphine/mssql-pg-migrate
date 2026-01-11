@@ -30,12 +30,21 @@ type Pool struct {
 
 // NewPool creates a new MSSQL connection pool
 func NewPool(cfg *config.SourceConfig, maxConns int) (*Pool, error) {
+	encryptStr := "false"
+	if cfg.Encrypt != nil && *cfg.Encrypt {
+		encryptStr = "true"
+	}
 	trustCert := "false"
 	if cfg.TrustServerCert {
 		trustCert = "true"
 	}
 	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.Encrypt, trustCert)
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, encryptStr, trustCert)
+
+	// Add packet size for better throughput (default 4KB is too small)
+	if cfg.PacketSize > 0 {
+		dsn += fmt.Sprintf("&packet+size=%d", cfg.PacketSize)
+	}
 
 	db, err := sql.Open("sqlserver", dsn)
 	if err != nil {

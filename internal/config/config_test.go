@@ -86,7 +86,7 @@ func TestMSSQLDSNURLEncoding(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{}
 			dsn := cfg.buildMSSQLDSN("localhost", 1433, tt.database, tt.user, tt.password,
-				"true", false, "", "", "", "", "")
+				true, false, 0, "", "", "", "", "")
 
 			// Check that encoded values appear in DSN
 			if !strings.Contains(dsn, tt.wantUser+":") {
@@ -202,7 +202,7 @@ func TestMSSQLKerberosEncoding(t *testing.T) {
 
 	// Test MSSQL Kerberos with special chars
 	dsn := cfg.buildMSSQLDSN("localhost", 1433, "my database", "user@REALM.COM", "",
-		"true", false, "kerberos", "/path/to/krb5.conf", "", "REALM.COM", "MSSQLSvc/host:1433")
+		true, false, 0, "kerberos", "/path/to/krb5.conf", "", "REALM.COM", "MSSQLSvc/host:1433")
 
 	// database is QueryEscaped (+ for spaces)
 	if !strings.Contains(dsn, "database=my+database") {
