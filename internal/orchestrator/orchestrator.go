@@ -972,6 +972,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 			var stats *transfer.TransferStats
 			var err error
+		retryLoop:
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					// Exponential backoff: 1s, 2s, 4s, etc.
@@ -980,7 +981,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 					select {
 					case <-ctx.Done():
 						err = ctx.Err()
-						break
+						break retryLoop
 					case <-time.After(backoff):
 					}
 				}
