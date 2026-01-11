@@ -266,9 +266,19 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
    - Detects cross-engine via `sourceType == "postgres"`
    - Only applies WKT conversion for PG→MSSQL, not MSSQL→MSSQL
 3. Added unit tests for cross-engine geography/geometry conversion
-4. Test results with WideWorldImporters PG→MSSQL upsert:
-   - 9/9 tables pass including Customers with geography column
-   - 701K rows at 388K rows/sec
+4. Released v1.32.0 with PG→MSSQL geography upsert support
+5. Complete WWI upsert test results (all 4 directions with geography columns):
+   - **Test environment**: WSL2 with 32GB RAM, PostgreSQL 15 and SQL Server 2022 in Docker
+   - **Dataset**: WideWorldImporters Sales schema (9 tables, 701K rows, includes Customers with geography)
+
+   | Direction | Status | Throughput |
+   |-----------|--------|------------|
+   | MSSQL→MSSQL | ✓ 9/9 tables | 202K rows/sec |
+   | MSSQL→PG | ✓ 9/9 tables | 219K rows/sec |
+   | PG→MSSQL | ✓ 9/9 tables | 388K rows/sec |
+   | PG→PG | ✓ 9/9 tables | 482K rows/sec |
+
+   All directions now fully support upsert mode with geography/geometry columns.
 
 ### Session 7: MSSQL to MSSQL Fixes & Geography Support (Claude - January 11, 2026)
 1. Fixed MSSQL→MSSQL decimal column bulk copy (PR #39):
