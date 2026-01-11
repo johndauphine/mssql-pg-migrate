@@ -20,6 +20,12 @@
 # - Subsequent runs only fetch rows modified since the last sync
 # - Dramatically reduces transfer time for large tables with few changes
 #
+# NEW: drop_recreate can pre-populate timestamps for upsert!
+# - Add date_updated_columns to your drop_recreate config
+# - drop_recreate records sync timestamps WITHOUT applying date filters (full load)
+# - Subsequent upsert runs use those timestamps for incremental sync
+# - Eliminates the need for a "first sync" full-table upsert after drop_recreate
+#
 # Performance Notes:
 # - Full upsert is 2-5x slower than drop_recreate (index maintenance overhead)
 # - Incremental upsert with date filtering is extremely fast (seconds vs minutes)
@@ -27,10 +33,11 @@
 # - SQL Server uses staging table + UPDATE/INSERT
 #
 # Usage:
-#   # Step 1: Initial load (creates tables, fast bulk copy)
+#   # Step 1: Initial load with timestamp recording
+#   # (Add date_updated_columns to your drop_recreate config)
 #   ./mssql-pg-migrate -c config-drop-recreate.yaml run
 #
-#   # Step 2: Incremental syncs (uses highwater marks)
+#   # Step 2: Incremental syncs (uses timestamps from step 1)
 #   export MSSQL_PASSWORD="your-mssql-password"
 #   export PG_PASSWORD="your-postgres-password"
 #   ./mssql-pg-migrate -c examples/config-upsert.yaml run
