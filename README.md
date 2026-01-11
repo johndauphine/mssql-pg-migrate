@@ -27,9 +27,9 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 
 ## Security Notice
 
-### v1.42.0 Security Fixes
+### v1.43.0 Security Fixes
 
-**v1.42.0** addresses security vulnerabilities identified during code review:
+**v1.43.0** addresses security vulnerabilities identified during code review:
 
 - **DSN Injection Fix**: Connection strings now properly URL-encode credentials to prevent injection via special characters in usernames, passwords, or database names
 - **SQL Injection Fix**: Internal SQLite queries now use whitelist validation for table names
@@ -41,13 +41,13 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 **Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.mssql-pg-migrate/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
 
 **Recommended actions:**
-1. **Upgrade to v1.42.0 or later** - Includes all security fixes and credential sanitization
+1. **Upgrade to v1.43.0 or later** - Includes all security fixes and credential sanitization
 2. **Rotate your database passwords** if you used earlier versions with sensitive credentials
 3. **Delete the state database** if you want to ensure all traces are removed: `rm ~/.mssql-pg-migrate/migrate.db`
 
 Starting with v1.10.0, credentials are always redacted before being stored.
 
-## Incremental Sync (New in v1.42.0)
+## Incremental Sync (New in v1.43.0)
 
 For large databases with frequent updates, use **date-based incremental loading** to dramatically reduce sync times. Instead of transferring all rows every time, only rows modified since the last sync are transferred.
 
@@ -386,7 +386,7 @@ sensor = PythonSensor(
 | PostgreSQL | PostgreSQL | COPY protocol |
 | SQL Server | SQL Server | TDS bulk copy |
 
-### Same-Engine Migrations (New in v1.42.0)
+### Same-Engine Migrations (New in v1.43.0)
 
 Same-engine migrations (PG→PG, MSSQL→MSSQL) are now supported with all target modes:
 
@@ -411,6 +411,16 @@ migration:
 - Environment sync (dev → staging → prod)
 - Disaster recovery
 - Data center migrations
+
+### PostGIS Spatial Data Support (v1.43.0)
+
+Cross-engine migrations (PG→MSSQL) now correctly preserve spatial reference systems:
+
+- **SRID preservation** - Reads SRID from PostGIS `geometry_columns`/`geography_columns` metadata
+- **Automatic conversion** - WKT text converted to SQL Server geography/geometry with correct SRID
+- **Default fallback** - Uses SRID 4326 (WGS84) when source SRID is 0 or unset
+
+Previously, all spatial data was converted with hardcoded SRID 4326. Now the actual SRID from PostGIS is used (e.g., 2163 for NAD83, 3857 for Web Mercator).
 
 ## Features
 
@@ -446,21 +456,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/mssql-pg-migrate
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-linux-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.42.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.43.0/mssql-pg-migrate-v1.43.0-linux-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.43.0-linux-amd64.tar.gz
 chmod +x mssql-pg-migrate-linux-amd64
 ./mssql-pg-migrate-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-darwin-arm64.tar.gz
-tar -xzf mssql-pg-migrate-v1.42.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.43.0/mssql-pg-migrate-v1.43.0-darwin-arm64.tar.gz
+tar -xzf mssql-pg-migrate-v1.43.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-darwin-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.42.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.43.0/mssql-pg-migrate-v1.43.0-darwin-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.43.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.42.0/mssql-pg-migrate-v1.42.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.43.0/mssql-pg-migrate-v1.43.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
 tar -xzf mssql-pg-migrate.tar.gz
 ```
 
@@ -1187,7 +1197,7 @@ All migration directions with both target modes:
 | **MSSQL → PG** | 400-432K rows/sec | 261-272K rows/sec |
 | **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
 
-*Note: MSSQL source performance improved significantly in v1.42.0 with 32KB TDS packet size (default).*
+*Note: MSSQL source performance improved significantly in v1.43.0 with 32KB TDS packet size (default).*
 
 ### Key Observations
 
