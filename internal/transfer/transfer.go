@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -569,107 +568,41 @@ func executeKeysetPagination(
 		close(chunkChan)
 	}()
 
-	// Parallel writers setup
-	numWriters := cfg.Migration.WriteAheadWriters
-	if numWriters < 1 {
-		numWriters = 1
-	}
-
-	// Channel for dispatching write jobs to worker pool
-	writeJobChan := make(chan writeJob, bufferSize)
-
-	// Shared state for parallel writers
-	var totalWriteTime int64 // atomic, nanoseconds
-	var totalWritten int64   // atomic, rows written
-	var writeErr atomic.Pointer[error]
-	var writerWg sync.WaitGroup
-
-	// Writer cancellation context
-	writerCtx, cancelWriters := context.WithCancel(ctx)
-	defer cancelWriters()
-
-	// Start write workers
-	useUpsert := cfg.Migration.TargetMode == "upsert"
-	pkCols := job.Table.PrimaryKey
-
-	// Sanitize PK columns for upsert (only for PostgreSQL targets)
-	_, isPGTarget := tgtPool.(*target.Pool)
-	targetPKCols := make([]string, len(pkCols))
-	for i, pk := range pkCols {
-		if isPGTarget {
-			targetPKCols[i] = target.SanitizePGIdentifier(pk)
-		} else {
-			targetPKCols[i] = pk // Preserve original case for MSSQL
-		}
-	}
-
-	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
+	// Get partition ID for staging table naming
 	var partitionID *int
 	if job.Partition != nil {
 		partitionID = &job.Partition.PartitionID
 	}
 
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &totalWritten, cfg.Migration.CheckpointFrequency)
+	// Create writer pool
+	numWriters := cfg.Migration.WriteAheadWriters
+	if numWriters < 1 {
+		numWriters = 1
+	}
 
-	var ackChan chan writeAck
-	var ackWg sync.WaitGroup
+	wp := newWriterPool(ctx, writerPoolConfig{
+		NumWriters:   numWriters,
+		BufferSize:   bufferSize,
+		UseUpsert:    cfg.Migration.TargetMode == "upsert",
+		TargetSchema: cfg.Target.Schema,
+		TargetTable:  targetTableName,
+		TargetCols:   targetCols,
+		ColTypes:     colTypes,
+		ColSRIDs:     colSRIDs,
+		TargetPKCols: buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:  partitionID,
+		TgtPool:      tgtPool,
+		Prog:         prog,
+		EnableAck:    job.Saver != nil && job.TaskID > 0,
+	})
+
+	// Setup checkpoint coordinator
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, cfg.Migration.CheckpointFrequency)
 	if checkpointCoord != nil {
-		ackChan = make(chan writeAck, bufferSize)
-		ackWg.Add(1)
-		go func() {
-			defer ackWg.Done()
-			for ack := range ackChan {
-				checkpointCoord.onAck(ack)
-			}
-		}()
+		wp.startAckProcessor(checkpointCoord.onAck)
 	}
 
-	for i := 0; i < numWriters; i++ {
-		writerID := i // Capture for closure
-		writerWg.Add(1)
-		go func() {
-			defer writerWg.Done()
-			for job := range writeJobChan {
-				select {
-				case <-writerCtx.Done():
-					return
-				default:
-				}
-
-				rows := job.rows
-				writeStart := time.Now()
-				var err error
-				if useUpsert {
-					// Use high-performance staging table approach
-					// Pass colTypes to skip geography/geometry from change detection in MSSQL MERGE
-					// Pass colSRIDs for geography/geometry SRID in STGeomFromText (PG→MSSQL)
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, colSRIDs, targetPKCols, rows, writerID, partitionID)
-				} else {
-					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
-				}
-				if err != nil {
-					writeErr.CompareAndSwap(nil, &err)
-					cancelWriters()
-					return
-				}
-				writeDuration := time.Since(writeStart)
-				atomic.AddInt64(&totalWriteTime, int64(writeDuration))
-
-				// Update progress atomically
-				rowCount := int64(len(rows))
-				atomic.AddInt64(&totalWritten, rowCount)
-				prog.Add(rowCount)
-
-				if ackChan != nil {
-					ackChan <- writeAck{
-						readerID: job.readerID,
-						seq:      job.seq,
-						lastPK:   job.lastPK,
-					}
-				}
-			}
-		}()
-	}
+	wp.start()
 
 	// Main consumer loop - reads from chunkChan, dispatches to write pool
 	totalTransferred := resumeRowsDone
@@ -684,7 +617,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			cancelWriters()
+			wp.cancel()
 			break
 		}
 		if result.done {
@@ -704,18 +637,16 @@ chunkLoop:
 		lastWriteEnd = time.Now()
 
 		// Dispatch to write pool
-		select {
-		case writeJobChan <- writeJob{
+		if !wp.submit(writeJob{
 			rows:     result.rows,
 			lastPK:   result.lastPK,
 			readerID: result.readerID,
 			seq:      result.seq,
-		}:
-		case <-writerCtx.Done():
-			if err := writeErr.Load(); err != nil {
-				loopErr = fmt.Errorf("writing chunk: %w", *err)
+		}) {
+			if err := wp.error(); err != nil {
+				loopErr = fmt.Errorf("writing chunk: %w", err)
 			} else {
-				loopErr = writerCtx.Err()
+				loopErr = ctx.Err()
 			}
 			break chunkLoop
 		}
@@ -730,26 +661,21 @@ chunkLoop:
 		chunkCount++
 	}
 
-	// Close write job channel and wait for writers to finish
-	close(writeJobChan)
-	writerWg.Wait()
-	if ackChan != nil {
-		close(ackChan)
-		ackWg.Wait()
-	}
+	// Wait for writers to finish
+	wp.wait()
 
 	if loopErr != nil {
 		return stats, loopErr
 	}
 
 	// Check for write errors
-	if err := writeErr.Load(); err != nil {
-		return stats, fmt.Errorf("writing chunk: %w", *err)
+	if err := wp.error(); err != nil {
+		return stats, fmt.Errorf("writing chunk: %w", err)
 	}
 
 	// Aggregate stats
-	stats.WriteTime = time.Duration(atomic.LoadInt64(&totalWriteTime))
-	totalTransferred += atomic.LoadInt64(&totalWritten)
+	stats.WriteTime = wp.writeTime()
+	totalTransferred += wp.written()
 	stats.Rows = totalTransferred
 
 	// Save final progress
@@ -758,11 +684,7 @@ chunkLoop:
 		if checkpointCoord != nil {
 			finalLastPK = checkpointCoord.finalCheckpoint(lastPK)
 		}
-		var partID *int
-		if job.Partition != nil {
-			partID = &job.Partition.PartitionID
-		}
-		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, finalLastPK, totalTransferred, job.Table.RowCount); err != nil {
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalLastPK, totalTransferred, job.Table.RowCount); err != nil {
 			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}
@@ -911,40 +833,7 @@ func executeRowNumberPagination(
 		chunkChan <- chunkResult{done: true}
 	}()
 
-	// Parallel writers setup
-	numWriters := cfg.Migration.WriteAheadWriters
-	if numWriters < 1 {
-		numWriters = 1
-	}
-
-	// Channel for dispatching write jobs to worker pool
-	writeJobChan := make(chan writeJob, bufferSize)
-
-	// Shared state for parallel writers
-	var totalWriteTime int64 // atomic, nanoseconds
-	var totalWritten int64   // atomic, rows written
-	var writeErr atomic.Pointer[error]
-	var writerWg sync.WaitGroup
-
-	// Writer cancellation context
-	writerCtx, cancelWriters := context.WithCancel(ctx)
-	defer cancelWriters()
-
-	// Start write workers
-	useUpsert := cfg.Migration.TargetMode == "upsert"
-
-	// Sanitize PK columns for upsert (only for PostgreSQL targets)
-	_, isPGTarget := tgtPool.(*target.Pool)
-	targetPKCols := make([]string, len(job.Table.PrimaryKey))
-	for i, pk := range job.Table.PrimaryKey {
-		if isPGTarget {
-			targetPKCols[i] = target.SanitizePGIdentifier(pk)
-		} else {
-			targetPKCols[i] = pk // Preserve original case for MSSQL
-		}
-	}
-
-	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
+	// Get partition ID and row count for staging table naming and checkpointing
 	var partitionID *int
 	var partitionRows int64
 	if job.Partition != nil {
@@ -954,95 +843,67 @@ func executeRowNumberPagination(
 		partitionRows = job.Table.RowCount
 	}
 
+	// Create writer pool
+	numWriters := cfg.Migration.WriteAheadWriters
+	if numWriters < 1 {
+		numWriters = 1
+	}
+
+	enableAck := job.Saver != nil && job.TaskID > 0
+	wp := newWriterPool(ctx, writerPoolConfig{
+		NumWriters:   numWriters,
+		BufferSize:   bufferSize,
+		UseUpsert:    cfg.Migration.TargetMode == "upsert",
+		TargetSchema: cfg.Target.Schema,
+		TargetTable:  targetTableName,
+		TargetCols:   targetCols,
+		ColTypes:     colTypes,
+		ColSRIDs:     colSRIDs,
+		TargetPKCols: buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:  partitionID,
+		TgtPool:      tgtPool,
+		Prog:         prog,
+		EnableAck:    enableAck,
+	})
+
+	// Setup ROW_NUMBER checkpoint handler
 	checkpointFreq := cfg.Migration.CheckpointFrequency
 	if checkpointFreq <= 0 {
-		checkpointFreq = 10 // Default fallback
+		checkpointFreq = 10
 	}
-
-	var ackChan chan writeAck
-	var ackWg sync.WaitGroup
 	lastCheckpointRowNum := initialRowNum
 
-	if job.Saver != nil && job.TaskID > 0 {
-		ackChan = make(chan writeAck, bufferSize)
-		ackWg.Add(1)
-		go func() {
-			defer ackWg.Done()
-			expectedSeq := int64(0)
-			pending := make(map[int64]writeAck)
-			completedChunks := 0
-			for ack := range ackChan {
-				if ack.seq != expectedSeq {
-					pending[ack.seq] = ack
-					continue
-				}
-				for {
-					lastCheckpointRowNum = ack.rowNum
-					completedChunks++
-					if completedChunks%checkpointFreq == 0 {
-						rowsDone := resumeRowsDone + atomic.LoadInt64(&totalWritten)
-						if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
-							logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
-						}
-					}
-					expectedSeq++
-					next, ok := pending[expectedSeq]
-					if !ok {
-						break
-					}
-					delete(pending, expectedSeq)
-					ack = next
-				}
+	if enableAck {
+		expectedSeq := int64(0)
+		pending := make(map[int64]writeAck)
+		completedChunks := 0
+
+		wp.startAckProcessor(func(ack writeAck) {
+			if ack.seq != expectedSeq {
+				pending[ack.seq] = ack
+				return
 			}
-		}()
+			for {
+				lastCheckpointRowNum = ack.rowNum
+				completedChunks++
+				if completedChunks%checkpointFreq == 0 {
+					rowsDone := resumeRowsDone + wp.written()
+					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
+						logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
+					}
+				}
+				expectedSeq++
+				next, ok := pending[expectedSeq]
+				if !ok {
+					break
+				}
+				delete(pending, expectedSeq)
+				ack = next
+			}
+		})
 	}
 
-	for i := 0; i < numWriters; i++ {
-		writerID := i // Capture for closure (per-writer staging table isolation)
-		writerWg.Add(1)
-		go func() {
-			defer writerWg.Done()
-			for job := range writeJobChan {
-				select {
-				case <-writerCtx.Done():
-					return
-				default:
-				}
-
-				rows := job.rows
-				writeStart := time.Now()
-				var err error
-				if useUpsert {
-					// Use UpsertChunkWithWriter for high-performance staging table approach
-					// Pass colTypes to skip geography/geometry from change detection in MSSQL MERGE
-					// Pass colSRIDs for geography/geometry SRID in STGeomFromText (PG→MSSQL)
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, colSRIDs, targetPKCols, rows, writerID, partitionID)
-				} else {
-					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
-				}
-				if err != nil {
-					writeErr.CompareAndSwap(nil, &err)
-					cancelWriters()
-					return
-				}
-				writeDuration := time.Since(writeStart)
-				atomic.AddInt64(&totalWriteTime, int64(writeDuration))
-
-				// Update progress atomically
-				rowCount := int64(len(rows))
-				atomic.AddInt64(&totalWritten, rowCount)
-				prog.Add(rowCount)
-
-				if ackChan != nil {
-					ackChan <- writeAck{
-						readerID: job.readerID,
-						seq:      job.seq,
-						rowNum:   job.rowNum,
-					}
-				}
-			}
-		}()
-	}
+	wp.start()
 
 	// Main consumer loop - reads from chunkChan, dispatches to write pool
 	chunkCount := 0
@@ -1057,7 +918,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			cancelWriters()
+			wp.cancel()
 			break
 		}
 		if result.done {
@@ -1077,18 +938,16 @@ chunkLoop:
 		lastWriteEnd = time.Now()
 
 		// Dispatch to write pool
-		select {
-		case writeJobChan <- writeJob{
+		if !wp.submit(writeJob{
 			rows:     result.rows,
 			rowNum:   result.rowNum,
 			readerID: result.readerID,
 			seq:      result.seq,
-		}:
-		case <-writerCtx.Done():
-			if err := writeErr.Load(); err != nil {
-				loopErr = fmt.Errorf("writing chunk: %w", *err)
+		}) {
+			if err := wp.error(); err != nil {
+				loopErr = fmt.Errorf("writing chunk: %w", err)
 			} else {
-				loopErr = writerCtx.Err()
+				loopErr = ctx.Err()
 			}
 			break chunkLoop
 		}
@@ -1103,32 +962,27 @@ chunkLoop:
 		chunkCount++
 	}
 
-	// Close write job channel and wait for writers to finish
-	close(writeJobChan)
-	writerWg.Wait()
-	if ackChan != nil {
-		close(ackChan)
-		ackWg.Wait()
-	}
+	// Wait for writers to finish
+	wp.wait()
 
 	if loopErr != nil {
 		return stats, loopErr
 	}
 
 	// Check for write errors
-	if err := writeErr.Load(); err != nil {
-		return stats, fmt.Errorf("writing chunk: %w", *err)
+	if err := wp.error(); err != nil {
+		return stats, fmt.Errorf("writing chunk: %w", err)
 	}
 
 	// Aggregate stats
-	stats.WriteTime = time.Duration(atomic.LoadInt64(&totalWriteTime))
-	totalTransferred += atomic.LoadInt64(&totalWritten)
+	stats.WriteTime = wp.writeTime()
+	totalTransferred += wp.written()
 	stats.Rows = totalTransferred
 
 	// Save final progress
 	if job.Saver != nil && job.TaskID > 0 {
 		finalRowNum := currentRowNum
-		if ackChan != nil {
+		if enableAck {
 			finalRowNum = lastCheckpointRowNum
 		}
 		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalRowNum, totalTransferred, partitionRows); err != nil {
