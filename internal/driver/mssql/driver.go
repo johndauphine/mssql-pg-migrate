@@ -25,10 +25,12 @@ func (d *Driver) Aliases() []string {
 // Defaults returns the default configuration values for MSSQL.
 func (d *Driver) Defaults() driver.DriverDefaults {
 	return driver.DriverDefaults{
-		Port:       1433,
-		Schema:     "dbo",
-		Encrypt:    true,  // Secure default
-		PacketSize: 32767, // 32KB max - significantly improves read/write throughput
+		Port:                  1433,
+		Schema:                "dbo",
+		Encrypt:               true,  // Secure default
+		PacketSize:            32767, // 32KB max - significantly improves read/write throughput
+		WriteAheadWriters:     2,     // Conservative due to TABLOCK bulk insert serialization
+		ScaleWritersWithCores: false, // More writers = more contention with TABLOCK
 	}
 }
 

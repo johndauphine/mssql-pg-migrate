@@ -11,6 +11,7 @@ import (
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"gopkg.in/yaml.v3"
 
 	// Import driver packages to trigger init() registration before validation
@@ -426,24 +427,29 @@ func (c *Config) applyDefaults() {
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
-	// Auto-tune parallel writers based on CPU cores and target type
-	// MSSQL targets: very conservative (2) due to TABLOCK bulk insert serialization
-	// PostgreSQL targets: moderate (2-4) as COPY handles parallelism well
+	// Auto-tune parallel writers based on target driver defaults
 	if c.Migration.WriteAheadWriters == 0 {
-		if canonicalDriverName(c.Target.Type) == "mssql" {
-			// MSSQL: TABLOCK serializes writes, more writers = more contention
-			c.Migration.WriteAheadWriters = 2
+		if targetDriver, err := driver.Get(c.Target.Type); err == nil {
+			defaults := targetDriver.Defaults()
+			if defaults.ScaleWritersWithCores {
+				// Scale with CPU cores (e.g., PostgreSQL COPY handles parallelism well)
+				cores := c.autoConfig.CPUCores
+				writers := cores / 4
+				if writers < defaults.WriteAheadWriters {
+					writers = defaults.WriteAheadWriters
+				}
+				if writers > 4 {
+					writers = 4
+				}
+				c.Migration.WriteAheadWriters = writers
+			} else {
+				// Use fixed value (e.g., MSSQL TABLOCK serializes writes)
+				c.Migration.WriteAheadWriters = defaults.WriteAheadWriters
+			}
 		} else {
-			// PostgreSQL: COPY handles parallelism well
-			cores := c.autoConfig.CPUCores
-			writers := cores / 4
-			if writers < 2 {
-				writers = 2
-			}
-			if writers > 4 {
-				writers = 4
-			}
-			c.Migration.WriteAheadWriters = writers
+			// Fallback for unknown drivers - log warning as this may indicate a config issue
+			logging.Warn("Unknown target driver type '%s', using fallback WriteAheadWriters=2", c.Target.Type)
+			c.Migration.WriteAheadWriters = 2
 		}
 	}
 	// Auto-tune parallel readers based on CPU cores
@@ -966,12 +972,17 @@ func (c *Config) DebugDump() string {
 	pgConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
 	b.WriteString(fmt.Sprintf("  MaxPgConnections: %s\n", formatAutoValue(c.Migration.MaxPgConnections, ac.OriginalMaxPgConns, pgConnsExpl)))
 
-	// WriteAheadWriters
+	// WriteAheadWriters - use driver defaults for explanation
 	var writersExpl string
-	if canonicalDriverName(c.Target.Type) == "mssql" {
-		writersExpl = "fixed 2 (MSSQL TABLOCK)"
+	if targetDriver, err := driver.Get(c.Target.Type); err == nil {
+		defaults := targetDriver.Defaults()
+		if defaults.ScaleWritersWithCores {
+			writersExpl = fmt.Sprintf("driver default scaled with cores (%d cores)", ac.CPUCores)
+		} else {
+			writersExpl = fmt.Sprintf("driver default fixed at %d", defaults.WriteAheadWriters)
+		}
 	} else {
-		writersExpl = fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
+		writersExpl = "fallback default"
 	}
 	b.WriteString(fmt.Sprintf("  WriteAheadWriters: %s\n", formatAutoValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, writersExpl)))
 

@@ -27,9 +27,11 @@ func (d *Driver) Aliases() []string {
 // Defaults returns the default configuration values for PostgreSQL.
 func (d *Driver) Defaults() driver.DriverDefaults {
 	return driver.DriverDefaults{
-		Port:    5432,
-		Schema:  "public",
-		SSLMode: "require", // Secure default
+		Port:                  5432,
+		Schema:                "public",
+		SSLMode:               "require", // Secure default
+		WriteAheadWriters:     2,         // Minimum, scaled with cores
+		ScaleWritersWithCores: true,      // COPY handles parallelism well
 	}
 }
 

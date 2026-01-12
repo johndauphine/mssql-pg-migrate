@@ -1,0 +1,40 @@
+# WideWorldImporters Sales schema migration - UPSERT mode
+# Source: mssql-wwi (port 1435)
+# Target: pg-wwi (port 5435)
+#
+# Note: Geography columns are automatically converted to WKT text format
+# Excluded tables: *_Archive (temporal history tables without primary keys)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1435
+  database: WideWorldImporters
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5435
+  database: wideworldimporters
+  user: postgres
+  password: "PostgresPassword123"
+  schema: sales
+  ssl_mode: disable
+
+migration:
+  target_mode: upsert
+  workers: 6
+  chunk_size: 50000
+  create_indexes: false
+  create_foreign_keys: false
+
+  # Exclude archive tables without PKs (geography columns now supported!)
+  exclude_tables:
+    - Customers_Archive
+    - BuyingGroups_Archive
+    - CustomerCategories_Archive
