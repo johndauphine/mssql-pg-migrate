@@ -84,13 +84,13 @@ func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AI
 	}
 	config.CacheFile = os.ExpandEnv(config.CacheFile)
 
-	// Set default models
+	// Set default models - use smarter models for better type inference accuracy
 	if config.Model == "" {
 		switch AIProvider(config.Provider) {
 		case ProviderClaude:
-			config.Model = "claude-3-haiku-20240307"
+			config.Model = "claude-sonnet-4-20250514"
 		case ProviderOpenAI:
-			config.Model = "gpt-4o-mini"
+			config.Model = "gpt-4o"
 		}
 	}
 
@@ -335,7 +335,7 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 
 	// Include sanitized sample values if available for better context
 	if len(info.SampleValues) > 0 {
-		sb.WriteString("\nSample values from source data:\n")
+		sb.WriteString("\nSample values from source data (this is how the data will be transferred):\n")
 		totalBytes := 0
 		samplesIncluded := 0
 		for _, v := range info.SampleValues {
@@ -355,13 +355,22 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 			totalBytes += len(display)
 			samplesIncluded++
 		}
+		sb.WriteString("The target column must be able to store these exact values.\n")
 	}
 
-	sb.WriteString("\nReturn ONLY the equivalent ")
+	// Add target database constraints before the instruction
+	switch info.TargetDBType {
+	case "postgres":
+		sb.WriteString("\nIMPORTANT: Target is standard PostgreSQL WITHOUT PostGIS.\n")
+		sb.WriteString("The following types DO NOT EXIST: geometry, geography, hstore.\n")
+	case "mssql":
+		sb.WriteString("\nTarget is SQL Server with full native type support including spatial types.\n")
+	}
+
+	sb.WriteString("\nReturn ONLY the ")
 	sb.WriteString(info.TargetDBType)
-	sb.WriteString(" type with appropriate size/precision.\n")
-	sb.WriteString("Example: varchar(255) or numeric(10,2)\n")
-	sb.WriteString("Do not include any explanation, just the type name.")
+	sb.WriteString(" type name (e.g., varchar(255), numeric(10,2), text).\n")
+	sb.WriteString("No explanation, just the type.")
 
 	return sb.String()
 }

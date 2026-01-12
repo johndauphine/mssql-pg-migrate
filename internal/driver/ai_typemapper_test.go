@@ -54,8 +54,8 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		provider      string
 		expectedModel string
 	}{
-		{"claude", "claude-3-haiku-20240307"},
-		{"openai", "gpt-4o-mini"},
+		{"claude", "claude-sonnet-4-20250514"},
+		{"openai", "gpt-4o"},
 	}
 
 	for _, tt := range tests {
