@@ -31,7 +31,11 @@ const (
 type AITypeMappingConfig struct {
 	Enabled        bool   // Enable AI type mapping
 	Provider       string // "claude" or "openai"
-	APIKey         string // API key (can use ${ENV_VAR} syntax)
+	APIKey         string // API key - supports same patterns as password:
+	//                       ${file:/path/to/key} - read from file
+	//                       ${env:VAR_NAME} - read from env var
+	//                       ${VAR_NAME} - legacy env var syntax
+	//                       or literal value (not recommended)
 	CacheFile      string // Path to cache file
 	Model          string // Model to use (optional)
 	TimeoutSeconds int    // API timeout
@@ -54,16 +58,11 @@ func NewAITypeMapper(config AITypeMappingConfig) (*AITypeMapper, error) {
 		return nil, fmt.Errorf("AI type mapping is not enabled")
 	}
 
+	// API key should already be expanded by config loading (supports ${file:...}, ${env:...}, ${VAR})
+	// Just verify it's not empty after expansion
 	if config.APIKey == "" {
 		return nil, fmt.Errorf("AI type mapping requires an API key")
 	}
-
-	// Expand environment variables in API key
-	apiKey := os.ExpandEnv(config.APIKey)
-	if apiKey == "" || apiKey == config.APIKey && strings.HasPrefix(config.APIKey, "${") {
-		return nil, fmt.Errorf("AI API key environment variable not set")
-	}
-	config.APIKey = apiKey
 
 	// Set defaults
 	if config.TimeoutSeconds <= 0 {

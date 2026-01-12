@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -32,29 +31,24 @@ func TestNewAITypeMapper_MissingAPIKey(t *testing.T) {
 	}
 }
 
-func TestNewAITypeMapper_EnvVarAPIKey(t *testing.T) {
-	// Set up test API key
-	os.Setenv("TEST_AI_API_KEY", "test-key-123")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
+func TestNewAITypeMapper_APIKeyProvided(t *testing.T) {
+	// API key expansion happens at config loading time (before NewAITypeMapper is called)
+	// This test verifies that a pre-expanded API key is accepted
 	config := AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
-		APIKey:   "${TEST_AI_API_KEY}",
+		APIKey:   "test-key-123", // Already expanded by config loading
 	}
 	mapper, err := NewAITypeMapper(config)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if mapper.config.APIKey != "test-key-123" {
-		t.Errorf("expected expanded API key 'test-key-123', got '%s'", mapper.config.APIKey)
+		t.Errorf("expected API key 'test-key-123', got '%s'", mapper.config.APIKey)
 	}
 }
 
 func TestNewAITypeMapper_DefaultModel(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	tests := []struct {
 		provider      string
 		expectedModel string
@@ -68,7 +62,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 			config := AITypeMappingConfig{
 				Enabled:  true,
 				Provider: tt.provider,
-				APIKey:   "${TEST_AI_API_KEY}",
+				APIKey:   "test-key",
 			}
 			mapper, err := NewAITypeMapper(config)
 			if err != nil {
@@ -119,13 +113,10 @@ func TestTypeMappingCache(t *testing.T) {
 }
 
 func TestAITypeMapper_CacheKey(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
-		APIKey:   "${TEST_AI_API_KEY}",
+		APIKey:   "test-key",
 	})
 
 	info := TypeInfo{
@@ -145,13 +136,10 @@ func TestAITypeMapper_CacheKey(t *testing.T) {
 }
 
 func TestAITypeMapper_Fallback(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
-		APIKey:   "${TEST_AI_API_KEY}",
+		APIKey:   "test-key",
 	})
 
 	tests := []struct {
@@ -174,13 +162,10 @@ func TestAITypeMapper_Fallback(t *testing.T) {
 }
 
 func TestAITypeMapper_CanMap(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
-		APIKey:   "${TEST_AI_API_KEY}",
+		APIKey:   "test-key",
 	})
 
 	// AI mapper should always return true for CanMap
@@ -193,13 +178,10 @@ func TestAITypeMapper_CanMap(t *testing.T) {
 }
 
 func TestAITypeMapper_SupportedTargets(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
-		APIKey:   "${TEST_AI_API_KEY}",
+		APIKey:   "test-key",
 	})
 
 	targets := mapper.SupportedTargets()
@@ -209,13 +191,10 @@ func TestAITypeMapper_SupportedTargets(t *testing.T) {
 }
 
 func TestAITypeMapper_BuildPrompt(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
-		APIKey:   "${TEST_AI_API_KEY}",
+		APIKey:   "test-key",
 	})
 
 	info := TypeInfo{
@@ -248,9 +227,6 @@ func TestAITypeMapper_BuildPrompt(t *testing.T) {
 }
 
 func TestAITypeMapper_CachePersistence(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	// Create temp directory for cache
 	tmpDir := t.TempDir()
 	cacheFile := filepath.Join(tmpDir, "type-cache.json")
@@ -258,7 +234,7 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:   true,
 		Provider:  "claude",
-		APIKey:    "${TEST_AI_API_KEY}",
+		APIKey:    "test-key",
 		CacheFile: cacheFile,
 	})
 
@@ -276,7 +252,7 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 	mapper2, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:   true,
 		Provider:  "claude",
-		APIKey:    "${TEST_AI_API_KEY}",
+		APIKey:    "test-key",
 		CacheFile: cacheFile,
 	})
 
@@ -291,13 +267,10 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 }
 
 func TestAITypeMapper_ExportCache(t *testing.T) {
-	os.Setenv("TEST_AI_API_KEY", "test-key")
-	defer os.Unsetenv("TEST_AI_API_KEY")
-
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
-		APIKey:   "${TEST_AI_API_KEY}",
+		APIKey:   "test-key",
 	})
 
 	mapper.cache.Set("mysql:postgres:mediumblob:0:0:0", "bytea")

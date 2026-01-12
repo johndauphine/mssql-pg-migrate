@@ -1090,3 +1090,83 @@ func TestConfigValidationWithAliases(t *testing.T) {
 		})
 	}
 }
+
+func TestSanitizedRedactsAIAPIKey(t *testing.T) {
+	cfg := &Config{
+		Source: SourceConfig{
+			Type:     "mssql",
+			Host:     "localhost",
+			Database: "test",
+			Password: "secret-password",
+		},
+		Target: TargetConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Database: "test",
+			Password: "another-secret",
+		},
+		Migration: MigrationConfig{
+			TargetMode: "drop_recreate",
+			AITypeMapping: &AITypeMappingConfig{
+				Enabled:  true,
+				Provider: "claude",
+				APIKey:   "sk-ant-api-key-12345",
+			},
+		},
+		Slack: SlackConfig{
+			Enabled:    true,
+			WebhookURL: "https://hooks.slack.com/secret",
+		},
+	}
+
+	sanitized := cfg.Sanitized()
+
+	// Verify all secrets are redacted
+	if sanitized.Source.Password != "[REDACTED]" {
+		t.Errorf("Source password not redacted: %s", sanitized.Source.Password)
+	}
+	if sanitized.Target.Password != "[REDACTED]" {
+		t.Errorf("Target password not redacted: %s", sanitized.Target.Password)
+	}
+	if sanitized.Slack.WebhookURL != "[REDACTED]" {
+		t.Errorf("Slack webhook not redacted: %s", sanitized.Slack.WebhookURL)
+	}
+	if sanitized.Migration.AITypeMapping.APIKey != "[REDACTED]" {
+		t.Errorf("AI API key not redacted: %s", sanitized.Migration.AITypeMapping.APIKey)
+	}
+
+	// Verify original is unchanged
+	if cfg.Source.Password == "[REDACTED]" {
+		t.Error("Original source password was modified")
+	}
+	if cfg.Migration.AITypeMapping.APIKey == "[REDACTED]" {
+		t.Error("Original AI API key was modified")
+	}
+}
+
+func TestSanitizedWithNilAIConfig(t *testing.T) {
+	cfg := &Config{
+		Source: SourceConfig{
+			Type:     "mssql",
+			Host:     "localhost",
+			Database: "test",
+			Password: "secret",
+		},
+		Target: TargetConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Database: "test",
+			Password: "secret",
+		},
+		Migration: MigrationConfig{
+			TargetMode:    "drop_recreate",
+			AITypeMapping: nil, // No AI config
+		},
+	}
+
+	// Should not panic
+	sanitized := cfg.Sanitized()
+	if sanitized.Migration.AITypeMapping != nil {
+		t.Error("Expected AITypeMapping to remain nil")
+	}
+}

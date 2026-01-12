@@ -206,7 +206,12 @@ type AITypeMappingConfig struct {
 	// Provider specifies which AI provider to use ("claude" or "openai").
 	Provider string `yaml:"provider"`
 
-	// APIKey is the API key for the AI provider (can use ${ENV_VAR} syntax).
+	// APIKey is the API key for the AI provider.
+	// Supports the same secret patterns as passwords:
+	//   ${file:/path/to/key} - read from file (recommended for production)
+	//   ${env:VAR_NAME} - read from environment variable
+	//   ${VAR_NAME} - legacy env var syntax
+	//   literal value - not recommended, use file or env instead
 	APIKey string `yaml:"api_key"`
 
 	// CacheFile is the path to the JSON cache file for type mappings.
@@ -812,6 +817,14 @@ func (c *Config) Sanitized() *Config {
 		sanitized.Slack.WebhookURL = "[REDACTED]"
 	}
 
+	// Redact AI API key
+	if sanitized.Migration.AITypeMapping != nil && sanitized.Migration.AITypeMapping.APIKey != "" {
+		// Make a copy to avoid modifying the original
+		aiConfig := *sanitized.Migration.AITypeMapping
+		aiConfig.APIKey = "[REDACTED]"
+		sanitized.Migration.AITypeMapping = &aiConfig
+	}
+
 	return &sanitized
 }
 
@@ -1098,6 +1111,27 @@ func (c *Config) DebugDump() string {
 		b.WriteString("  WebhookURL: [REDACTED]\n")
 	} else {
 		b.WriteString("  Slack: disabled\n")
+	}
+
+	// AI Type Mapping
+	b.WriteString("\nAI Type Mapping:\n")
+	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled {
+		b.WriteString("  Enabled: true\n")
+		b.WriteString(fmt.Sprintf("  Provider: %s\n", c.Migration.AITypeMapping.Provider))
+		b.WriteString("  APIKey: [REDACTED]\n")
+		if c.Migration.AITypeMapping.Model != "" {
+			b.WriteString(fmt.Sprintf("  Model: %s\n", c.Migration.AITypeMapping.Model))
+		} else {
+			b.WriteString("  Model: (provider default)\n")
+		}
+		if c.Migration.AITypeMapping.CacheFile != "" {
+			b.WriteString(fmt.Sprintf("  CacheFile: %s\n", c.Migration.AITypeMapping.CacheFile))
+		}
+		if c.Migration.AITypeMapping.TimeoutSeconds > 0 {
+			b.WriteString(fmt.Sprintf("  Timeout: %ds\n", c.Migration.AITypeMapping.TimeoutSeconds))
+		}
+	} else {
+		b.WriteString("  Enabled: false\n")
 	}
 
 	return b.String()
