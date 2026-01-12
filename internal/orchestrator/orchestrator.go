@@ -714,9 +714,13 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Create progress saver for chunk-level resume
 	progressSaver := checkpoint.NewProgressSaver(o.state)
 
-	// Check if date-based incremental sync is enabled (upsert mode + DateUpdatedColumns configured)
-	dateIncrementalEnabled := o.config.Migration.TargetMode == "upsert" &&
-		len(o.config.Migration.DateUpdatedColumns) > 0
+	// Check if date column tracking is enabled (for timestamp recording)
+	// Enabled when date_updated_columns is configured, regardless of target mode
+	// This allows drop_recreate to populate timestamps for subsequent upsert runs
+	dateTrackingEnabled := len(o.config.Migration.DateUpdatedColumns) > 0
+
+	// Date filtering (incremental sync) is only applied in upsert mode
+	applyDateFilter := o.config.Migration.TargetMode == "upsert"
 
 	// Map to track date filters per table (for updating sync timestamp after success)
 	tableDateFilters := make(map[string]*transfer.DateFilter)
@@ -751,9 +755,9 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	for _, t := range tables {
 		logging.Debug("Processing table %s (rows=%d, large=%v)", t.Name, t.RowCount, t.IsLarge(o.config.Migration.LargeTableThreshold))
 
-		// Determine date filter for this table (if incremental sync is enabled)
+		// Determine date filter for this table (if date tracking is enabled)
 		var dateFilter *transfer.DateFilter
-		if dateIncrementalEnabled {
+		if dateTrackingEnabled {
 			colName, colType, found := o.sourcePool.GetDateColumnInfo(
 				ctx, t.Schema, t.Name, o.config.Migration.DateUpdatedColumns)
 			if found {
@@ -763,34 +767,47 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				// Record sync start time (capture before transfer starts)
 				syncStartTime := time.Now().UTC()
 				tableSyncStartTimes[t.Name] = syncStartTime
+				tableDateFilters[t.Name] = nil // Mark for timestamp recording (nil = no filter, just tracking)
 
-				// Get last sync timestamp
-				lastSync, err := o.state.GetLastSyncTimestamp(t.Schema, t.Name, o.config.Target.Schema)
-				if err != nil {
-					logging.Warn("Failed to get last sync timestamp for %s: %v", t.Name, err)
-				}
-
-				if lastSync != nil {
-					dateFilter = &transfer.DateFilter{
-						Column:    colName,
-						Timestamp: *lastSync,
+				// Only apply date filter in upsert mode
+				if applyDateFilter {
+					// Get last sync timestamp
+					lastSync, err := o.state.GetLastSyncTimestamp(t.Schema, t.Name, o.config.Target.Schema)
+					if err != nil {
+						logging.Warn("Failed to get last sync timestamp for %s: %v", t.Name, err)
 					}
-					tableDateFilters[t.Name] = dateFilter
-					tablesIncremental++
-					logging.Info("Table %s: incremental - syncing rows where %s > %v",
-						t.Name, colName, lastSync.Format(time.RFC3339))
+
+					if lastSync != nil {
+						dateFilter = &transfer.DateFilter{
+							Column:    colName,
+							Timestamp: *lastSync,
+						}
+						tableDateFilters[t.Name] = dateFilter
+						tablesIncremental++
+						logging.Info("Table %s: incremental - syncing rows where %s > %v",
+							t.Name, colName, lastSync.Format(time.RFC3339))
+					} else {
+						// First sync - no date filter, but we'll record the sync timestamp
+						tablesFirstSync++
+						logging.Info("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
+							t.Name, t.RowCount, colName)
+					}
 				} else {
-					// First sync - no date filter, but we'll record the sync timestamp
-					tableDateFilters[t.Name] = nil // nil means first sync
+					// drop_recreate mode - full load but record timestamp for future upsert runs
 					tablesFirstSync++
-					logging.Info("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
-						t.Name, t.RowCount, colName)
+					logging.Info("Table %s: full load - recording %s timestamp for future incremental syncs",
+						t.Name, colName)
 				}
 			} else {
 				tablesNoDateColumn++
 				noDateColumnTables = append(noDateColumnTables, t.Name)
-				logging.Info("Table %s: full sync - no date column, syncing all %d rows (repeated each run)",
-					t.Name, t.RowCount)
+				if applyDateFilter {
+					logging.Info("Table %s: full sync - no date column, syncing all %d rows (repeated each run)",
+						t.Name, t.RowCount)
+				} else {
+					logging.Info("Table %s: full load - no date column configured",
+						t.Name)
+				}
 			}
 		}
 
@@ -885,13 +902,18 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		logging.Info("Partition queries completed in %s", totalPartitionTime.Round(time.Millisecond))
 	}
 
-	// Log incremental sync summary
-	if dateIncrementalEnabled {
+	// Log date tracking summary
+	if dateTrackingEnabled {
 		if tablesIncremental > 0 || tablesFirstSync > 0 || tablesNoDateColumn > 0 {
-			logging.Info("Incremental sync summary: %d tables incremental, %d tables first sync, %d tables full sync (no date column)",
-				tablesIncremental, tablesFirstSync, tablesNoDateColumn)
+			if applyDateFilter {
+				logging.Info("Incremental sync summary: %d tables incremental, %d tables first sync, %d tables full sync (no date column)",
+					tablesIncremental, tablesFirstSync, tablesNoDateColumn)
+			} else {
+				logging.Info("Timestamp recording: %d tables with date columns, %d tables without",
+					tablesFirstSync, tablesNoDateColumn)
+			}
 		}
-		if tablesNoDateColumn > 0 {
+		if tablesNoDateColumn > 0 && applyDateFilter {
 			logging.Info("Tables without date columns will sync all rows every run: %v", noDateColumnTables)
 		}
 	}
