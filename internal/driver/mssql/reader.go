@@ -247,10 +247,7 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 		if includeStr != "" {
 			idx.Include = util.SplitCSV(includeStr)
 		}
-		// Note: The Table type in driver package doesn't have an Indexes field.
-		// This method is used by the orchestrator to load indexes separately.
-		// We would need to modify the caller to handle this differently.
-		_ = idx
+		t.Indexes = append(t.Indexes, idx)
 	}
 
 	return nil

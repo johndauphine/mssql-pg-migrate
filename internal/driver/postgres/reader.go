@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -234,15 +235,14 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 	}
 	defer rows.Close()
 
-	// Note: indexes are stored elsewhere, this just demonstrates the query
 	for rows.Next() {
-		var name, columns string
-		var isUnique, isClustered bool
-		if err := rows.Scan(&name, &isUnique, &isClustered, &columns); err != nil {
+		var idx driver.Index
+		var columns string
+		if err := rows.Scan(&idx.Name, &idx.IsUnique, &idx.IsClustered, &columns); err != nil {
 			return err
 		}
-		// Would store in t.Indexes if we had that field
-		_ = driver.Index{Name: name, IsUnique: isUnique, IsClustered: isClustered}
+		idx.Columns = strings.Split(columns, ",")
+		t.Indexes = append(t.Indexes, idx)
 	}
 	return rows.Err()
 }

@@ -80,6 +80,8 @@ func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone 
 }
 
 // onAck handles a write acknowledgement.
+// THREAD SAFETY: This method is called from a single goroutine via startAckProcessor,
+// which reads from the ackChan sequentially. No concurrent access to state fields occurs.
 func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
 	if c == nil {
 		return

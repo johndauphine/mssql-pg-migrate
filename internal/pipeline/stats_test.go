@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,7 +38,7 @@ func TestStats_String(t *testing.T) {
 				}
 			}
 			// For non-empty, just verify it contains rows count
-			if tt.name == "balanced times" && !contains(result, "rows=1000") {
+			if tt.name == "balanced times" && !strings.Contains(result, "rows=1000") {
 				t.Errorf("result should contain rows count: %s", result)
 			}
 		})
@@ -88,17 +89,4 @@ func TestStats_RowsPerSecond(t *testing.T) {
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

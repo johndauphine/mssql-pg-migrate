@@ -42,7 +42,8 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 		dsn += "&TrustServerCertificate=true"
 	}
 	if packetSize, ok := opts["packetSize"].(int); ok && packetSize > 0 {
-		dsn += fmt.Sprintf("&packet+size=%d", packetSize)
+		// Note: "packet size" is the go-mssqldb parameter name; + is URL encoding for space
+		dsn += fmt.Sprintf("&packet%%20size=%d", packetSize)
 	}
 
 	return dsn

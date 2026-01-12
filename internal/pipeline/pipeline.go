@@ -329,6 +329,9 @@ func (p *Pipeline) executeKeysetPagination(
 	wp.start()
 
 	// Main consumer loop
+	// SYNCHRONIZATION: loopErr is set from the main goroutine only. The channel receive
+	// from chunkChan happens-before any access, and wp.wait() ensures all writers complete
+	// before we check wp.error(). No race conditions exist.
 	totalTransferred := resumeRowsDone
 	chunkCount := 0
 	var totalOverlap time.Duration
@@ -562,6 +565,8 @@ func (p *Pipeline) executeRowNumberPagination(
 	lastCheckpointRowNum := initialRowNum
 
 	if enableAck {
+		// THREAD SAFETY: These variables are only accessed from the single ack processor
+		// goroutine started by startAckProcessor. No mutex needed.
 		expectedSeq := int64(0)
 		pending := make(map[int64]writeAck)
 		completedChunks := 0
