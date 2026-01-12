@@ -19,6 +19,8 @@ internal/
 │   ├── config.go           # Config structs, YAML parsing, DSN building, LoadBytes, DefaultDataDir
 │   ├── permissions_unix.go # File permission check (Linux/macOS)
 │   └── permissions_windows.go # File permission check (Windows)
+├── dbconfig/               # Database configuration types (breaks circular import)
+│   └── dbconfig.go         # SourceConfig, TargetConfig structs
 ├── driver/                  # Pluggable database driver abstractions (NEW)
 │   ├── driver.go           # Driver interface, registry pattern
 │   ├── reader.go           # Reader interface (source abstraction)
@@ -279,6 +281,30 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 14: Config-Driver Circular Import Fix (Claude - January 12, 2026)
+1. Addressed remaining pluggable driver blockers identified by Codex review:
+   - Config validation was hard-coding mssql/postgres (config.go:660-672)
+   - Factory used legacy switch instead of driver registry (factory.go:16-69)
+2. **PR #58 - Driver Alias Validation**:
+   - Initially tried importing driver package in config.go - hit circular import error
+   - Workaround: Created `supportedDrivers` map in config.go with hardcoded aliases
+   - Added helper functions: `canonicalDriverName()`, `isValidDriverType()`, `availableDriverTypes()`
+   - Updated factory.go to use `driver.Get()` then switch on canonical `d.Name()`
+   - Codex review caught case-sensitivity bug: fixed with `strings.ToLower()` in registry
+3. **PR #59 - Breaking Circular Import**:
+   - Gemini review noted `supportedDrivers` map duplicates driver registry info
+   - Created `internal/dbconfig/dbconfig.go` with `SourceConfig` and `TargetConfig` types
+   - Both driver and config packages can now import dbconfig without cycles
+   - Updated config.go to use type aliases: `type SourceConfig = dbconfig.SourceConfig`
+   - Removed `supportedDrivers` workaround - now uses driver registry directly
+   - Config validation uses `driver.IsRegistered()` for validation
+   - Factory uses `driver.Get()` to resolve aliases to canonical names
+4. Architecture improvements:
+   - Driver registry is now single source of truth for driver validation
+   - Adding new driver only requires implementing in `internal/driver/<name>/`
+   - No changes needed to config.go or factory.go for new drivers
+5. Pre-commit test runner: All tests pass, no regressions
 
 ### Session 13: Pluggable Database Architecture (Claude - January 11, 2026)
 1. Implemented pluggable database architecture (PR #56) - Phases 1-5 of refactoring plan:
