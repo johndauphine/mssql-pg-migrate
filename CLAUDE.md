@@ -111,11 +111,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
+6a3031d Merge pull request #62 - use driver registry for defaults
+6177666 fix: use driver registry for defaults instead of hardcoded fallbacks
+35b8c72 chore: bump version to 2.2.0
 e263d89 Merge pull request #61 - fix PG→MSSQL upsert with geography columns
 df28b7a fix: PG→MSSQL upsert with geography columns
-a5bf6c7 docs: update README with v2.1.0 benchmark results
-e1b3ccd chore: bump version to 2.1.0
-bdcf722 Merge pull request #60 - make factory truly pluggable with driver registry
 ```
 
 ### Major Features
@@ -281,6 +281,25 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 17: Driver Defaults Refactoring (Claude - January 12, 2026)
+1. **PR #62 - Use driver registry for defaults instead of hardcoded fallbacks**:
+   - Addressed Codex feedback: `applyDefaults()` and DSN helpers hard-biased to MSSQL/Postgres
+   - Added `DriverDefaults` struct to `driver.Driver` interface
+   - Each driver returns its own defaults via `Defaults()` method:
+     - PostgreSQL: Port 5432, Schema "public", SSLMode "require"
+     - MSSQL: Port 1433, Schema "dbo", Encrypt true, PacketSize 32767
+   - Refactored `applyDefaults()` to use `driver.Get().Defaults()`
+   - Updated `SourceDSN()`/`TargetDSN()` with explicit switch on canonical driver name
+   - Unknown driver types return empty DSN (caught by validation earlier)
+2. **WWI Benchmark Validation (all 4 directions)**:
+   | Direction | Tables | Throughput |
+   |-----------|--------|------------|
+   | MSSQL → PG | 9/9 | 328K rows/sec |
+   | PG → MSSQL | 9/9 | 459K rows/sec |
+   | PG → PG | 9/9 | 464K rows/sec |
+   | MSSQL → MSSQL | 9/9 | 288K rows/sec |
+3. Released v2.21.0
 
 ### Session 16: PG→MSSQL Geography Upsert Fix (Claude - January 12, 2026)
 1. **PR #61 - Fix PG→MSSQL upsert with geography columns**:
