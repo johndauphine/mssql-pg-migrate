@@ -59,6 +59,7 @@ type Orchestrator struct {
 	runProfile string
 	runConfig  string
 	opts       Options
+	targetMode TargetModeStrategy
 }
 
 // Options configures the orchestrator.
@@ -257,6 +258,16 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	// Create notifier
 	notifier := notify.New(&cfg.Slack)
 
+	// Create target mode strategy
+	targetModeStrategy := NewTargetModeStrategy(
+		cfg.Migration.TargetMode,
+		targetPool,
+		cfg.Target.Schema,
+		cfg.Migration.CreateIndexes,
+		cfg.Migration.CreateForeignKeys,
+		cfg.Migration.CreateCheckConstraints,
+	)
+
 	return &Orchestrator{
 		config:     cfg,
 		sourcePool: sourcePool,
@@ -265,6 +276,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		progress:   progress.New(),
 		notifier:   notifier,
 		opts:       opts,
+		targetMode: targetModeStrategy,
 	}, nil
 }
 
@@ -397,113 +409,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		return fmt.Errorf("creating schema: %w", err)
 	}
 
-	if o.config.Migration.TargetMode == "upsert" {
-		// Upsert mode requires tables to already exist with primary keys.
-		// Use drop_recreate for initial load, then upsert for incremental syncs.
-		logging.Info("Validating target tables (upsert mode)...")
-		var sourceMissingPK []string
-		var missingTables []string
-		var targetMissingPK []string
-		for i, t := range tables {
-			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
-			// Validate source table has PK for upsert (required for ON CONFLICT / MERGE)
-			if !t.HasPK() {
-				sourceMissingPK = append(sourceMissingPK, t.Name)
-				continue // Skip target checks if source has no PK
-			}
-			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
-			if err != nil {
-				o.state.CompleteRun(runID, "failed", err.Error())
-				o.notifyFailure(runID, err, time.Since(startTime))
-				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
-			}
-			if !exists {
-				missingTables = append(missingTables, t.Name)
-			} else {
-				// Table exists - verify it has a primary key (required for ON CONFLICT / MERGE)
-				hasPK, err := o.targetPool.HasPrimaryKey(ctx, o.config.Target.Schema, t.Name)
-				if err != nil {
-					o.state.CompleteRun(runID, "failed", err.Error())
-					o.notifyFailure(runID, err, time.Since(startTime))
-					return fmt.Errorf("checking primary key for %s: %w", t.Name, err)
-				}
-				if !hasPK {
-					targetMissingPK = append(targetMissingPK, t.Name)
-				}
-			}
-		}
-		// Report all validation errors at once for better UX
-		var validationErrors []string
-		if len(sourceMissingPK) > 0 {
-			validationErrors = append(validationErrors,
-				fmt.Sprintf("source tables missing primary keys: %v", sourceMissingPK))
-		}
-		if len(missingTables) > 0 {
-			validationErrors = append(validationErrors,
-				fmt.Sprintf("target tables do not exist: %v", missingTables))
-		}
-		if len(targetMissingPK) > 0 {
-			validationErrors = append(validationErrors,
-				fmt.Sprintf("target tables missing primary keys: %v", targetMissingPK))
-		}
-		if len(validationErrors) > 0 {
-			err := fmt.Errorf("upsert mode validation failed - %s. "+
-				"Run with target_mode: drop_recreate first to create tables, then use upsert for incremental syncs",
-				strings.Join(validationErrors, "; "))
-			o.state.CompleteRun(runID, "failed", err.Error())
-			o.notifyFailure(runID, err, time.Since(startTime))
-			return err
-		}
-	} else {
-		// Default: drop_recreate
-		logging.Info("Creating target tables (drop and recreate)...")
-
-		// Phase 1: Drop all tables in parallel (no FK dependencies since we're dropping)
-		logging.Debug("  Dropping %d tables in parallel...", len(tables))
-		var dropWg sync.WaitGroup
-		dropErrs := make(chan error, len(tables))
-		for _, t := range tables {
-			dropWg.Add(1)
-			go func(table source.Table) {
-				defer dropWg.Done()
-				if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, table.Name); err != nil {
-					dropErrs <- fmt.Errorf("dropping table %s: %w", table.Name, err)
-				}
-			}(t)
-		}
-		dropWg.Wait()
-		close(dropErrs)
-		if err := <-dropErrs; err != nil {
-			o.state.CompleteRun(runID, "failed", err.Error())
-			o.notifyFailure(runID, err, time.Since(startTime))
-			return err
-		}
-
-		// Phase 2: Create all tables with PKs in parallel
-		logging.Debug("  Creating %d tables in parallel...", len(tables))
-		var createWg sync.WaitGroup
-		createErrs := make(chan error, len(tables))
-		for _, t := range tables {
-			createWg.Add(1)
-			go func(table source.Table) {
-				defer createWg.Done()
-				if err := o.targetPool.CreateTable(ctx, &table, o.config.Target.Schema); err != nil {
-					createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
-					return
-				}
-				// Create PK immediately after table (PKs are part of table structure)
-				if err := o.targetPool.CreatePrimaryKey(ctx, &table, o.config.Target.Schema); err != nil {
-					createErrs <- fmt.Errorf("creating PK for %s: %w", table.FullName(), err)
-				}
-			}(t)
-		}
-		createWg.Wait()
-		close(createErrs)
-		if err := <-createErrs; err != nil {
-			o.state.CompleteRun(runID, "failed", err.Error())
-			o.notifyFailure(runID, err, time.Since(startTime))
-			return err
-		}
+	// Prepare target tables using the appropriate strategy
+	if err := o.targetMode.PrepareTables(ctx, tables); err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return err
 	}
 
 	// Transfer data
@@ -548,7 +458,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.progress.SetPhase("finalizing")
 	logging.Info("Finalizing...")
 	o.state.UpdatePhase(runID, "finalizing")
-	if err := o.finalize(ctx, successTables); err != nil {
+	if err := o.targetMode.Finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
@@ -947,7 +857,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Skip this on resume so completed partitions aren't wiped.
 	// Skip this in upsert mode - upserts are idempotent and don't require truncation.
 	// Non-partitioned tables are truncated inside transfer.Execute as before.
-	if !resume && o.config.Migration.TargetMode != "upsert" {
+	if !resume && o.targetMode.ShouldTruncateBeforeTransfer() {
 		// Collect unique table names that need truncation
 		tablesToTruncate := make(map[string]bool)
 		for _, j := range jobs {
@@ -1166,110 +1076,6 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	return failures, nil
 }
 
-func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
-	// In upsert mode, tables already exist with PKs, sequences, indexes, FKs, and constraints.
-	// Nothing to finalize - return early.
-	if o.config.Migration.TargetMode == "upsert" {
-		logging.Debug("  Skipping finalize (upsert mode - tables already have constraints)")
-		return nil
-	}
-
-	// Phase 1: Reset sequences (parallel - no dependencies between tables)
-	logging.Debug("  Resetting sequences...")
-	var seqWg sync.WaitGroup
-	for _, t := range tables {
-		seqWg.Add(1)
-		go func(table source.Table) {
-			defer seqWg.Done()
-			if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &table); err != nil {
-				logging.Warn("Warning: resetting sequence for %s: %v", table.Name, err)
-			}
-		}(t)
-	}
-	seqWg.Wait()
-
-	// Note: PKs are created with tables (not deferred to finalize)
-
-	// Phase 2: Create indexes (if enabled) - parallel per table
-	if o.config.Migration.CreateIndexes {
-		// Count total indexes for logging
-		totalIndexes := 0
-		for _, t := range tables {
-			totalIndexes += len(t.Indexes)
-		}
-		if totalIndexes > 0 {
-			logging.Debug("  Creating %d indexes in parallel...", totalIndexes)
-		}
-
-		var idxWg sync.WaitGroup
-		for _, t := range tables {
-			for _, idx := range t.Indexes {
-				idxWg.Add(1)
-				go func(table source.Table, index source.Index) {
-					defer idxWg.Done()
-					if err := o.targetPool.CreateIndex(ctx, &table, &index, o.config.Target.Schema); err != nil {
-						logging.Warn("Warning: creating index %s on %s: %v", index.Name, table.Name, err)
-					}
-				}(t, idx)
-			}
-		}
-		idxWg.Wait()
-	}
-
-	// Phase 3: Create foreign keys (if enabled) - parallel per table
-	// Note: FKs can be created in parallel since all tables and PKs exist at this point
-	if o.config.Migration.CreateForeignKeys {
-		totalFKs := 0
-		for _, t := range tables {
-			totalFKs += len(t.ForeignKeys)
-		}
-		if totalFKs > 0 {
-			logging.Debug("  Creating %d foreign keys in parallel...", totalFKs)
-		}
-
-		var fkWg sync.WaitGroup
-		for _, t := range tables {
-			for _, fk := range t.ForeignKeys {
-				fkWg.Add(1)
-				go func(table source.Table, foreignKey source.ForeignKey) {
-					defer fkWg.Done()
-					if err := o.targetPool.CreateForeignKey(ctx, &table, &foreignKey, o.config.Target.Schema); err != nil {
-						logging.Warn("Warning: creating FK %s on %s: %v", foreignKey.Name, table.Name, err)
-					}
-				}(t, fk)
-			}
-		}
-		fkWg.Wait()
-	}
-
-	// Phase 4: Create check constraints (if enabled) - parallel per table
-	if o.config.Migration.CreateCheckConstraints {
-		totalChecks := 0
-		for _, t := range tables {
-			totalChecks += len(t.CheckConstraints)
-		}
-		if totalChecks > 0 {
-			logging.Debug("  Creating %d check constraints in parallel...", totalChecks)
-		}
-
-		var chkWg sync.WaitGroup
-		for _, t := range tables {
-			for _, chk := range t.CheckConstraints {
-				chkWg.Add(1)
-				go func(table source.Table, check source.CheckConstraint) {
-					defer chkWg.Done()
-					if err := o.targetPool.CreateCheckConstraint(ctx, &table, &check, o.config.Target.Schema); err != nil {
-						logging.Warn("Warning: creating CHECK %s on %s: %v", check.Name, table.Name, err)
-					}
-				}(t, chk)
-			}
-		}
-		chkWg.Wait()
-	}
-
-	return nil
-}
-
 // Resume continues an interrupted migration
 func (o *Orchestrator) Resume(ctx context.Context) error {
 	run, err := o.state.GetLastIncompleteRun()
@@ -1362,7 +1168,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		// Finalize
 		o.progress.SetPhase("finalizing")
 		logging.Info("Finalizing...")
-		if err := o.finalize(ctx, tables); err != nil {
+		if err := o.targetMode.Finalize(ctx, tables); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
 			o.notifyFailure(run.ID, err, time.Since(startTime))
 			return fmt.Errorf("finalizing: %w", err)
@@ -1481,7 +1287,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	o.tables = successTables
 	o.progress.SetPhase("finalizing")
 	logging.Info("Finalizing...")
-	if err := o.finalize(ctx, successTables); err != nil {
+	if err := o.targetMode.Finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
