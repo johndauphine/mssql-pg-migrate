@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
+	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
 )
 
 // SourcePool defines the interface for source database operations
@@ -35,6 +36,7 @@ type SourcePool interface {
 	// Pool info
 	MaxConns() int
 	DBType() string // "mssql" or "postgres"
+	PoolStats() stats.PoolStats
 }
 
 // TargetPool defines the interface for target database operations
@@ -76,6 +78,7 @@ type TargetPool interface {
 	// Pool info
 	MaxConns() int
 	DBType() string // "mssql" or "postgres"
+	PoolStats() stats.PoolStats
 }
 
 // BulkWriter defines the interface for bulk data writing operations

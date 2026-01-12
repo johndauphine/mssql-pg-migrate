@@ -11,6 +11,7 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
+	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
 	"github.com/johndauphine/mssql-pg-migrate/internal/typemap"
 	mssql "github.com/microsoft/go-mssqldb"
 )
@@ -97,6 +98,19 @@ func (p *MSSQLPool) DBType() string {
 // CompatLevel returns the database compatibility level (e.g., 130 for SQL Server 2016)
 func (p *MSSQLPool) CompatLevel() int {
 	return p.compatLevel
+}
+
+// PoolStats returns connection pool statistics in the unified format.
+func (p *MSSQLPool) PoolStats() stats.PoolStats {
+	dbStats := p.db.Stats()
+	return stats.PoolStats{
+		DBType:      "mssql",
+		MaxConns:    dbStats.MaxOpenConnections,
+		ActiveConns: dbStats.InUse,
+		IdleConns:   dbStats.Idle,
+		WaitCount:   dbStats.WaitCount,
+		WaitTimeMs:  dbStats.WaitDuration.Milliseconds(),
+	}
 }
 
 // CreateSchema creates the target schema if it doesn't exist

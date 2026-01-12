@@ -54,7 +54,7 @@ type Orchestrator struct {
 	targetPool pool.TargetPool
 	state      checkpoint.StateBackend
 	progress   *progress.Tracker
-	notifier   *notify.Notifier
+	notifier   notify.Provider
 	tables     []source.Table
 	runProfile string
 	runConfig  string
@@ -1021,27 +1021,11 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	o.progress.Finish()
 
-	// Print pool stats (based on pool type) - debug level
+	// Print pool stats using the unified interface
 	if logging.IsDebug() {
 		logging.Debug("\nConnection Pool Usage:")
-		switch p := o.sourcePool.(type) {
-		case *source.Pool:
-			stats := p.Stats()
-			logging.Debug("  Source (mssql): %d/%d active, %d idle, %d waits (%.1fms avg)",
-				stats.InUse, stats.MaxOpenConnections, stats.Idle,
-				stats.WaitCount, float64(stats.WaitDuration)/float64(max(stats.WaitCount, 1)))
-		case *source.PgxSourcePool:
-			logging.Debug("  Source (postgres): max connections=%d", p.MaxConns())
-		}
-		switch p := o.targetPool.(type) {
-		case *target.Pool:
-			stats := p.Stats()
-			logging.Debug("  Target (postgres): %d/%d active, %d idle, %d acquires (%d waited)",
-				stats.AcquiredConns, stats.MaxConns, stats.IdleConns,
-				stats.AcquireCount, stats.EmptyAcquireCount)
-		case *target.MSSQLPool:
-			logging.Debug("  Target (mssql): max connections=%d", p.MaxConns())
-		}
+		logging.Debug("  Source %s", o.sourcePool.PoolStats())
+		logging.Debug("  Target %s", o.targetPool.PoolStats())
 
 		// Print profiling stats
 		logging.Debug("\nTransfer Profile (per table):")
