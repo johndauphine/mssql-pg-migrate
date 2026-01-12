@@ -11,6 +11,7 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
 	"github.com/johndauphine/mssql-pg-migrate/internal/util"
 )
 
@@ -102,6 +103,19 @@ func (p *PgxSourcePool) MaxConns() int {
 // DBType returns the database type
 func (p *PgxSourcePool) DBType() string {
 	return "postgres"
+}
+
+// PoolStats returns connection pool statistics in the unified format.
+func (p *PgxSourcePool) PoolStats() stats.PoolStats {
+	poolStats := p.pool.Stat()
+	return stats.PoolStats{
+		DBType:      "postgres",
+		MaxConns:    int(poolStats.MaxConns()),
+		ActiveConns: int(poolStats.AcquiredConns()),
+		IdleConns:   int(poolStats.IdleConns()),
+		WaitCount:   0, // pgxpool doesn't track wait count directly
+		WaitTimeMs:  0, // pgxpool doesn't track wait time directly
+	}
 }
 
 // GetRowCount returns the row count for a table

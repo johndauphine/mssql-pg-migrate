@@ -8,6 +8,7 @@ import (
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
+	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
 	"github.com/johndauphine/mssql-pg-migrate/internal/util"
 	_ "github.com/microsoft/go-mssqldb"
 )
@@ -96,6 +97,19 @@ func (p *Pool) MaxConns() int {
 // DBType returns the database type
 func (p *Pool) DBType() string {
 	return "mssql"
+}
+
+// PoolStats returns connection pool statistics in the unified format.
+func (p *Pool) PoolStats() stats.PoolStats {
+	dbStats := p.db.Stats()
+	return stats.PoolStats{
+		DBType:      "mssql",
+		MaxConns:    dbStats.MaxOpenConnections,
+		ActiveConns: dbStats.InUse,
+		IdleConns:   dbStats.Idle,
+		WaitCount:   dbStats.WaitCount,
+		WaitTimeMs:  dbStats.WaitDuration.Milliseconds(),
+	}
 }
 
 // GetRowCount returns the row count for a table

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
+	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
 )
 
 // PoolStats contains connection pool statistics
@@ -94,6 +95,19 @@ func (p *Pool) MaxConns() int {
 // DBType returns the database type
 func (p *Pool) DBType() string {
 	return "postgres"
+}
+
+// PoolStats returns connection pool statistics in the unified format.
+func (p *Pool) PoolStats() stats.PoolStats {
+	poolStats := p.pool.Stat()
+	return stats.PoolStats{
+		DBType:      "postgres",
+		MaxConns:    int(poolStats.MaxConns()),
+		ActiveConns: int(poolStats.AcquiredConns()),
+		IdleConns:   int(poolStats.IdleConns()),
+		WaitCount:   poolStats.EmptyAcquireCount(), // Closest equivalent
+		WaitTimeMs:  0,                             // pgxpool doesn't track wait time directly
+	}
 }
 
 // CreateSchema creates the target schema if it doesn't exist
