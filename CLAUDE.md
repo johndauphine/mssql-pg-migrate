@@ -111,11 +111,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
+cd9176e Merge pull request #63 - move WriteAheadWriters tuning to driver interface
+1bf682c fix: log warning when using fallback WriteAheadWriters
+0fb0357 refactor: move WriteAheadWriters tuning to driver interface
 6a3031d Merge pull request #62 - use driver registry for defaults
 6177666 fix: use driver registry for defaults instead of hardcoded fallbacks
-35b8c72 chore: bump version to 2.2.0
-e263d89 Merge pull request #61 - fix PG→MSSQL upsert with geography columns
-df28b7a fix: PG→MSSQL upsert with geography columns
 ```
 
 ### Major Features
@@ -281,6 +281,20 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 18: WriteAheadWriters Driver Tuning (Claude - January 12, 2026)
+1. **PR #63 - Move WriteAheadWriters tuning to driver interface**:
+   - Addressed Gemini review feedback for full pluggability
+   - Added `WriteAheadWriters` and `ScaleWritersWithCores` to `DriverDefaults`
+   - PostgreSQL: `ScaleWritersWithCores=true` (scales 2-4 based on CPU cores)
+   - MSSQL: `ScaleWritersWithCores=false`, fixed at 2 (TABLOCK serialization)
+   - `applyDefaults()` now uses driver defaults instead of hardcoded if/else
+2. **Copilot Review Fixes**:
+   - Removed accidentally committed `pr58.diff` file
+   - Fixed comment in driver.go to match implementation
+   - Updated DebugDump to use driver defaults for explanation text
+   - Added `logging.Warn()` for unknown driver fallback
+3. Released v2.22.0
 
 ### Session 17: Driver Defaults Refactoring (Claude - January 12, 2026)
 1. **PR #62 - Use driver registry for defaults instead of hardcoded fallbacks**:
