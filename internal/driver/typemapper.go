@@ -115,3 +115,20 @@ func GetDirection(sourceType, targetType string) Direction {
 		return MSSQLToPostgres
 	}
 }
+
+// NewTypeMapperFromConfig creates a TypeMapper based on the configuration.
+// If AITypeMappingConfig is provided and enabled, returns an AI-powered mapper.
+// Otherwise returns the provided static fallback mapper.
+// This helper avoids duplicating AI mapper initialization in each writer.
+func NewTypeMapperFromConfig(aiConfig *AITypeMappingConfig, staticMapper TypeMapper) (TypeMapper, error) {
+	if aiConfig == nil || !aiConfig.Enabled {
+		return staticMapper, nil
+	}
+
+	aiMapper, err := NewAITypeMapper(*aiConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return aiMapper, nil
+}

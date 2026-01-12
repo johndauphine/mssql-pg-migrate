@@ -42,7 +42,8 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 //   - maxConns: Maximum number of connections in the pool
 //   - mssqlRowsPerBatch: Rows per batch for bulk operations (passed via WriterOptions)
 //   - sourceType: Source database type for cross-engine type handling
-func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int, sourceType string) (TargetPool, error) {
+//   - aiConfig: Optional AI type mapping configuration (nil to use static mappers)
+func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int, sourceType string, aiConfig *driver.AITypeMappingConfig) (TargetPool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
 	if dbType == "" {
@@ -58,8 +59,9 @@ func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int
 	// Create the writer using the driver's factory method
 	// This is truly pluggable - no switch statement needed
 	opts := driver.WriterOptions{
-		RowsPerBatch: mssqlRowsPerBatch,
-		SourceType:   sourceType,
+		RowsPerBatch:  mssqlRowsPerBatch,
+		SourceType:    sourceType,
+		AITypeMapping: aiConfig,
 	}
 	return d.NewWriter((*dbconfig.TargetConfig)(cfg), maxConns, opts)
 }

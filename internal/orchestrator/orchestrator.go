@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/notify"
 	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
@@ -213,8 +214,21 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		return nil, fmt.Errorf("creating source pool: %w", err)
 	}
 
+	// Convert AI type mapping config if enabled
+	var aiConfig *driver.AITypeMappingConfig
+	if cfg.Migration.AITypeMapping != nil && cfg.Migration.AITypeMapping.Enabled {
+		aiConfig = &driver.AITypeMappingConfig{
+			Enabled:        cfg.Migration.AITypeMapping.Enabled,
+			Provider:       cfg.Migration.AITypeMapping.Provider,
+			APIKey:         cfg.Migration.AITypeMapping.APIKey,
+			CacheFile:      cfg.Migration.AITypeMapping.CacheFile,
+			Model:          cfg.Migration.AITypeMapping.Model,
+			TimeoutSeconds: cfg.Migration.AITypeMapping.TimeoutSeconds,
+		}
+	}
+
 	// Create target pool using factory
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch, cfg.Source.Type)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch, cfg.Source.Type, aiConfig)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)

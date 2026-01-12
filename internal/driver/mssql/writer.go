@@ -24,6 +24,7 @@ type Writer struct {
 	compatLevel  int
 	sourceType   string
 	dialect      *Dialect
+	typeMapper   driver.TypeMapper
 }
 
 // NewWriter creates a new SQL Server writer.
@@ -60,6 +61,23 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 
 	logging.Info("Connected to MSSQL target: %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
 
+	// Initialize type mapper - use AI mapper if configured, otherwise static
+	typeMapper, err := driver.NewTypeMapperFromConfig(opts.AITypeMapping, &TypeMapper{})
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating type mapper: %w", err)
+	}
+
+	// Log AI mapper initialization
+	if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
+		logging.Info("AI Type Mapping enabled (provider: %s, model: %s)",
+			opts.AITypeMapping.Provider, opts.AITypeMapping.Model)
+		logging.Info("AI Type Mapper initialized with cache: %s", opts.AITypeMapping.CacheFile)
+		if aiMapper.CacheSize() > 0 {
+			logging.Info("Loaded %d cached AI type mappings", aiMapper.CacheSize())
+		}
+	}
+
 	return &Writer{
 		db:           db,
 		config:       cfg,
@@ -68,6 +86,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		compatLevel:  compatLevel,
 		sourceType:   opts.SourceType,
 		dialect:      dialect,
+		typeMapper:   typeMapper,
 	}, nil
 }
 
@@ -139,20 +158,33 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string) string {
 
 	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", w.dialect.QualifyTable(targetSchema, t.Name)))
 
-	mapper := &TypeMapper{}
+	// Check if using AI mapper for logging
+	_, isAIMapper := w.typeMapper.(*driver.AITypeMapper)
+	if isAIMapper {
+		logging.Info("AI Type Mapping: generating DDL for table %s (%d columns)", t.Name, len(t.Columns))
+	}
+
 	for i, col := range t.Columns {
 		if i > 0 {
 			sb.WriteString(",\n")
 		}
 
-		mssqlType := mapper.MapType(driver.TypeInfo{
+		// Map type using configured mapper (static or AI)
+		typeInfo := driver.TypeInfo{
 			SourceDBType: w.sourceType,
 			TargetDBType: "mssql",
 			DataType:     col.DataType,
 			MaxLength:    col.MaxLength,
 			Precision:    col.Precision,
 			Scale:        col.Scale,
-		})
+		}
+		mssqlType := w.typeMapper.MapType(typeInfo)
+
+		// Log AI type mappings
+		if isAIMapper {
+			logging.Info("AI Type Mapping: %s.%s: %s(%d,%d,%d) -> %s",
+				t.Name, col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, mssqlType)
+		}
 
 		sb.WriteString(fmt.Sprintf("    %s %s", w.dialect.QuoteIdentifier(col.Name), mssqlType))
 

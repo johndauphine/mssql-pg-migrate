@@ -76,4 +76,8 @@ type WriterOptions struct {
 
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string
+
+	// AITypeMapping contains optional AI-assisted type mapping configuration.
+	// When enabled, the AI mapper is used for type conversions instead of static mappings.
+	AITypeMapping *AITypeMappingConfig
 }
