@@ -24,6 +24,17 @@ type DriverDefaults struct {
 
 	// PacketSize is the default TDS packet size (MSSQL only, 0 means driver default).
 	PacketSize int
+
+	// WriteAheadWriters is the default number of parallel writers for this target.
+	// Used when this database is the target of a migration.
+	WriteAheadWriters int
+
+	// ScaleWritersWithCores indicates whether WriteAheadWriters should scale with CPU cores.
+	// If true, config.applyDefaults() will calculate: min(max(cores/4, 2), 4)
+	// If false, WriteAheadWriters is used as-is.
+	// MSSQL: false (TABLOCK serializes writes, more writers = more contention)
+	// PostgreSQL: true (COPY handles parallelism well)
+	ScaleWritersWithCores bool
 }
 
 // Driver represents a pluggable database driver that provides all

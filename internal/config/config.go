@@ -426,24 +426,28 @@ func (c *Config) applyDefaults() {
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
-	// Auto-tune parallel writers based on CPU cores and target type
-	// MSSQL targets: very conservative (2) due to TABLOCK bulk insert serialization
-	// PostgreSQL targets: moderate (2-4) as COPY handles parallelism well
+	// Auto-tune parallel writers based on target driver defaults
 	if c.Migration.WriteAheadWriters == 0 {
-		if canonicalDriverName(c.Target.Type) == "mssql" {
-			// MSSQL: TABLOCK serializes writes, more writers = more contention
-			c.Migration.WriteAheadWriters = 2
+		if targetDriver, err := driver.Get(c.Target.Type); err == nil {
+			defaults := targetDriver.Defaults()
+			if defaults.ScaleWritersWithCores {
+				// Scale with CPU cores (e.g., PostgreSQL COPY handles parallelism well)
+				cores := c.autoConfig.CPUCores
+				writers := cores / 4
+				if writers < defaults.WriteAheadWriters {
+					writers = defaults.WriteAheadWriters
+				}
+				if writers > 4 {
+					writers = 4
+				}
+				c.Migration.WriteAheadWriters = writers
+			} else {
+				// Use fixed value (e.g., MSSQL TABLOCK serializes writes)
+				c.Migration.WriteAheadWriters = defaults.WriteAheadWriters
+			}
 		} else {
-			// PostgreSQL: COPY handles parallelism well
-			cores := c.autoConfig.CPUCores
-			writers := cores / 4
-			if writers < 2 {
-				writers = 2
-			}
-			if writers > 4 {
-				writers = 4
-			}
-			c.Migration.WriteAheadWriters = writers
+			// Fallback for unknown drivers
+			c.Migration.WriteAheadWriters = 2
 		}
 	}
 	// Auto-tune parallel readers based on CPU cores
