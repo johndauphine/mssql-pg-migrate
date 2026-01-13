@@ -401,10 +401,15 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 }
 
 func TestAITypeMapper_ExportCache(t *testing.T) {
+	// Use a temporary cache file to avoid pollution from other tests
+	tmpDir := t.TempDir()
+	cacheFile := filepath.Join(tmpDir, "test-cache.json")
+
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
-		Enabled:  true,
-		Provider: "claude",
-		APIKey:   "test-key",
+		Enabled:   true,
+		Provider:  "claude",
+		APIKey:    "test-key",
+		CacheFile: cacheFile,
 	}, nil)
 
 	mapper.cache.Set("mysql:postgres:mediumblob:0:0:0", "bytea")
