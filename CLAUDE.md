@@ -282,6 +282,31 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 20: AI Smart Config Analyze Command (Claude - January 12, 2026)
+1. **New `analyze` command for database analysis and configuration suggestions**:
+   - Analyzes source database schema and suggests optimal migration configuration
+   - Auto-tuned performance parameters: workers, chunk_size, read_ahead_buffers, max_partitions, large_table_threshold
+   - Formula-based calculations using system specs (CPU cores, memory via gopsutil)
+   - AI-suggested alternatives with reasoning when API key is configured
+2. **Created `internal/driver/ai_smartconfig.go`**:
+   - `SmartConfigAnalyzer` analyzes database schema for configuration suggestions
+   - `AutoTuneInput`/`AutoTuneOutput` structs for AI communication
+   - Date column detection for incremental sync (priority ordered)
+   - Archive/temp table exclusion pattern detection
+   - `FormatYAML()` outputs ready-to-use configuration snippet
+3. **SourceOnly orchestrator mode**:
+   - Added `Options.SourceOnly` to create orchestrator without target connection
+   - Analyze command only needs source database access
+4. **TUI `/analyze` command**:
+   - Added to model.go with file picker support (`/analyze @config.yaml`)
+5. **Fixes during development**:
+   - Added `--config`/`-c` flag to analyze CLI command (was missing)
+   - Increased Claude API `max_tokens` from 100 to 1024 for auto-tune JSON responses
+   - Created `AITypeMapper` in `AnalyzeConfig` when AI is configured
+   - Added `CallAI` method to `AITypeMapper` for general-purpose AI calls
+6. **Removed unused `smart_config` section from AI config** (was planned but never implemented)
+7. Released v2.25.0
+
 ### Session 19: Legacy Pool Cleanup - Phase 7 Complete (Claude - January 12, 2026)
 1. **PR #64 - Remove legacy pool implementations replaced by driver package**:
    - Completed Phase 7 of pluggable database architecture plan
