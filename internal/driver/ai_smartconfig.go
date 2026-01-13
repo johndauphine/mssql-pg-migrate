@@ -334,16 +334,8 @@ func (s *SmartConfigAnalyzer) calculateFormulaBasedParams(tables []tableInfo, av
 	s.suggestions.MaxPartitions = s.suggestions.Workers
 
 	// LargeTableThreshold: tables above this get partitioned
-	// Default 5M, or 10x the largest non-huge table
-	s.suggestions.LargeTableThreshold = 5000000
-	for _, t := range tables {
-		if t.RowCount > 1000000 && t.RowCount < 5000000 {
-			threshold := t.RowCount * 10
-			if threshold > s.suggestions.LargeTableThreshold {
-				s.suggestions.LargeTableThreshold = threshold
-			}
-		}
-	}
+	// Default 1M rows - tables larger than this benefit from parallel partitioning
+	s.suggestions.LargeTableThreshold = 1000000
 
 	// EstimatedMemoryMB: calculate expected memory usage
 	// Formula: workers * (read_ahead + write_ahead) * chunk_size * avg_row_size
