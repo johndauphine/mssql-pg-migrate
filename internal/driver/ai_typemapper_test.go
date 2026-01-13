@@ -293,7 +293,7 @@ func TestAITypeMapper_BuildPromptWithSamples(t *testing.T) {
 	prompt := mapper.buildPrompt(info)
 
 	// Check that prompt contains sample values section
-	if !bytes.Contains([]byte(prompt), []byte("Sample values from source data:")) {
+	if !bytes.Contains([]byte(prompt), []byte("Sample values from source data")) {
 		t.Error("prompt should contain sample values header")
 	}
 	if !bytes.Contains([]byte(prompt), []byte("POINT (-108.5523153 39.0430375)")) {

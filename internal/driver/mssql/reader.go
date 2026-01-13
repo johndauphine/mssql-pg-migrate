@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
@@ -368,6 +369,42 @@ func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column s
 	}
 
 	return samples, nil
+}
+
+// SampleRows retrieves sample rows from a table for AI type mapping context.
+// Returns a map of column name -> sample values (one query for all columns).
+func (r *Reader) SampleRows(ctx context.Context, schema, table string, columns []string, limit int) (map[string][]string, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+
+	// Validate identifiers
+	if err := driver.ValidateIdentifier(schema); err != nil {
+		return nil, fmt.Errorf("invalid schema name: %w", err)
+	}
+	if err := driver.ValidateIdentifier(table); err != nil {
+		return nil, fmt.Errorf("invalid table name: %w", err)
+	}
+
+	// Build column list with MSSQL NVARCHAR cast
+	var quotedCols []string
+	for _, col := range columns {
+		if err := driver.ValidateIdentifier(col); err != nil {
+			return nil, fmt.Errorf("invalid column name %s: %w", col, err)
+		}
+		quotedCols = append(quotedCols, fmt.Sprintf("CAST(%s AS NVARCHAR(MAX))", r.dialect.QuoteIdentifier(col)))
+	}
+
+	// Query TOP N rows with all columns
+	query := fmt.Sprintf(`SELECT TOP (@limit) %s FROM %s`,
+		strings.Join(quotedCols, ", "),
+		r.dialect.QualifyTable(schema, table))
+
+	result, err := driver.SampleRowsHelper(ctx, r.db, query, columns, limit, sql.Named("limit", limit))
+	if err != nil {
+		return nil, fmt.Errorf("sampling rows from %s: %w", table, err)
+	}
+	return result, nil
 }
 
 // ReadTable reads data from a table and returns batches via a channel.

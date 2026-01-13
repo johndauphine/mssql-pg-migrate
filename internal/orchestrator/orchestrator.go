@@ -371,21 +371,27 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 		}
 
-		// Sample column values for AI type mapping context
+		// Sample rows for AI type mapping context (one query per table for all columns)
 		if aiMappingEnabled {
-			sampleCount := 0
+			columnNames := make([]string, len(t.Columns))
 			for j := range t.Columns {
-				col := &t.Columns[j]
-				samples, err := o.sourcePool.SampleColumnValues(ctx, t.Schema, t.Name, col.Name, 5)
-				if err != nil {
-					logging.Debug("Sampling column %s.%s: %v", t.Name, col.Name, err)
-				} else if len(samples) > 0 {
-					col.SampleValues = samples
-					sampleCount++
-				}
+				columnNames[j] = t.Columns[j].Name
 			}
-			if sampleCount > 0 {
-				logging.Info("AI Type Mapping: sampled %d columns from %s for type inference context", sampleCount, t.Name)
+			samples, err := o.sourcePool.SampleRows(ctx, t.Schema, t.Name, columnNames, 5)
+			if err != nil {
+				logging.Debug("Sampling rows from %s: %v", t.Name, err)
+			} else {
+				sampleCount := 0
+				for j := range t.Columns {
+					col := &t.Columns[j]
+					if colSamples, ok := samples[col.Name]; ok && len(colSamples) > 0 {
+						col.SampleValues = colSamples
+						sampleCount++
+					}
+				}
+				if sampleCount > 0 {
+					logging.Info("AI Type Mapping: sampled %d rows from %s for type inference context", 5, t.Name)
+				}
 			}
 		}
 	}
