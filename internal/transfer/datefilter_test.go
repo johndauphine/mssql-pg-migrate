@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
+	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	// Import driver packages to register dialects
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/mssql"
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/postgres"
 )
 
 func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
@@ -64,7 +67,7 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := dialect.GetDialect(tt.dbType)
+			d := driver.GetDialect(tt.dbType)
 			query := d.BuildKeysetQuery(
 				"col1, col2, pk",
 				"pk",
@@ -161,7 +164,7 @@ func TestBuildKeysetArgsWithDateFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := dialect.GetDialect(tt.dbType)
+			d := driver.GetDialect(tt.dbType)
 			args := d.BuildKeysetArgs(
 				int64(0),  // lastPK
 				int64(99), // maxPK
