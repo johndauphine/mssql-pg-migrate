@@ -282,6 +282,33 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 21: AI-First Type Mapping with Aggressive Caching (Claude - January 12, 2026)
+1. **Codex review feedback on AI type mapping**:
+   - HIGH: AI was always primary mapper, triggering API calls for known types
+   - MEDIUM: Source DB aliases not canonicalized (sqlserver vs mssql)
+   - LOW: Row sampling failed on geography/geometry columns
+2. **Initial fixes (v2.25.2)**:
+   - Added `IsTypeKnown()` to check static mappings first
+   - Added `driver.Canonicalize()` for alias handling (sqlserver→mssql, postgresql→postgres)
+   - MSSQL reader uses `TRY_CONVERT` for row sampling (returns NULL for spatial types)
+   - PostgreSQL reader uses `(column)::text` for sampling
+3. **Architecture change - AI-first approach (v2.26.0)**:
+   - User prefers AI over hardcoded mappings for database agnosticism
+   - Removed `IsTypeKnown()` check - AI determines ALL type mappings
+   - Aggressive caching prevents repeated API calls (persisted to JSON file)
+   - Static mappings only used as fallback when AI fails
+   - Future databases require no type mapping code - AI figures it out
+4. **Test results with WWI Sales schema**:
+   - First run (cache empty): 17 AI API calls, 38s total
+   - Second run (cached): 0 API calls, 2s total, 405K rows/sec
+   - Cache effectiveness: 21.8x faster on subsequent runs
+   - All type mappings correct (int→integer, nvarchar→varchar, geography→text, etc.)
+5. **Key design decisions**:
+   - Each driver handles sampling quirks internally (TRY_CONVERT for MSSQL, ::text for PG)
+   - Cache key format: `source_db:target_db:type:length:precision:scale`
+   - No static mappings needed for future databases (MySQL, Oracle, etc.)
+6. Released v2.25.1, v2.25.2, v2.26.0
+
 ### Session 20: AI Smart Config Analyze Command (Claude - January 12, 2026)
 1. **New `analyze` command for database analysis and configuration suggestions**:
    - Analyzes source database schema and suggests optimal migration configuration
